@@ -78,6 +78,8 @@ def summarize(d: Path, result: dict, active: set[str]) -> dict:
         "warnings": len(result.get("warnings", [])), "error": result.get("error"),
         "total_seconds": result.get("total_seconds"), "rescored_from": result.get("rescored_from"),
         "legacy": legacy, "segment": read_segment_meta(d),
+        "detector": (result.get("detector") or {}).get("requested") or result.get("settings", {}).get("detector") or "classic",
+        "reused_transcript": result.get("transcript_reused_from"),
     }
 
 
@@ -143,7 +145,8 @@ def session_detail(settings: Settings, name: str, active: set[str] | None = None
             "start": c["start"], "end": c["end"], "duration": c["duration"],
             "transcript": clip_transcript(transcript, c["start"], c["end"]),
             "confidence": clip_confidence(transcript, c["start"], c["end"]),
-            "reasons": [{"name": x["name"], "value": x["value"], "note": x["note"]} for x in cand.get("components", [])],
+            "reasons": [{"name": x["name"], "value": x["value"], "note": x["note"], "weight": x.get("weight"),
+                         "contribution": x.get("contribution")} for x in cand.get("components", [])],
             "refine_notes": c.get("refine_notes", []), "boundaries": c.get("boundaries", {}),
             "audio": base.get("audio", {}), "versions": versions,
         })
@@ -154,7 +157,7 @@ def session_detail(settings: Settings, name: str, active: set[str] | None = None
         "ratings": {k: v for k, v in store.ratings.items() if k in ids},
         "settings": {k: result.get("settings", {}).get(k) for k in ("layout", "safe_platform", "max_clips", "whisper_model", "language")},
         "warnings": result.get("warnings", []), "stages": result.get("stages", {}), "resources": result.get("resources"),
-        "selection": result.get("selection"), "media_duration": (result.get("media") or {}).get("duration"),
+        "selection": result.get("selection"), "detector": result.get("detector"), "media_duration": (result.get("media") or {}).get("duration"),
         "has_source": Path(result.get("source", "")).is_file(),
     }
 

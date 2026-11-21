@@ -36,6 +36,10 @@ class Settings:
     max_clips: int = 3
     min_score: float = 0.35
     max_overlap: float = 0.15
+    # detección: «classic» (ranking original, línea base) o «smart» (Smart Highlights); ver docs/smart-highlights.md
+    detector: str = "classic"
+    smart_visual: bool = True              # smart: muestreo visual ligero y opcional (se degrada solo si falla)
+    reuse_transcript: bool = False         # reutiliza la transcripción válida de un job anterior del mismo video, modelo e idioma
     # análisis
     audio_peak_db: float = 6.0  # dB sobre el nivel habitual para considerar un pico de audio
     text_trigger: float = 0.5
@@ -114,6 +118,8 @@ class Settings:
             raise InvalidInputError("Duración de clip inválida: se requiere 5 <= min <= max <= 180 s")
         if not 1 <= self.max_clips <= 10:
             raise InvalidInputError("max_clips debe estar entre 1 y 10")
+        if self.detector not in ("classic", "smart"):
+            raise InvalidInputError(f"Detector desconocido: {self.detector} (classic o smart)")
         if self.layout not in ("blur-fit", "focus", "fill", "crop"):
             raise InvalidInputError(f"Layout desconocido: {self.layout}")
         if not (0 <= self.crop_x <= 1 and 0 <= self.crop_y <= 1 and 1 <= self.zoom <= 4):

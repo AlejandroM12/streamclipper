@@ -29,9 +29,7 @@ def session_dir(settings: Settings, name: str) -> Path:
 def run_process(settings: Settings):
     def runner(job: AppJob, ctl: JobControl) -> None:
         p = job.params
-        cfg = Settings(data_dir=settings.data_dir, whisper_model=p["model"], language=LANGUAGES[p["language"]],
-                       max_clips=p["max_clips"], layout=p["layout"], safe_platform=p["platform"],
-                       cpu_threads=settings.cpu_threads)
+        cfg = _process_settings(settings, p)
         source = job.input
         if job.input_kind == "url":
             ctl.stage("descarga", "running", None, "consultando metadata")
@@ -63,8 +61,10 @@ def run_process(settings: Settings):
 
 
 def _process_settings(settings: Settings, p: dict) -> Settings:
+    # reuse_transcript: un video ya transcrito con el mismo modelo e idioma no se retranscribe
     return Settings(data_dir=settings.data_dir, whisper_model=p["model"], language=LANGUAGES[p["language"]],
-                    max_clips=p["max_clips"], layout=p["layout"], safe_platform=p["platform"], cpu_threads=settings.cpu_threads)
+                    max_clips=p["max_clips"], layout=p["layout"], safe_platform=p["platform"], cpu_threads=settings.cpu_threads,
+                    detector=p.get("detector", "classic"), smart_visual=p.get("smart_visual", True), reuse_transcript=True)
 
 
 def real_segment(settings: Settings) -> Callable[[AppJob, Segment, JobControl], None]:

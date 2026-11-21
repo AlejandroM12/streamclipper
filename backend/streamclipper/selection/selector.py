@@ -92,5 +92,7 @@ def selection_report(candidates: list[Candidate], chosen: list[Candidate], ctx: 
 def find_clips(ctx: AnalysisContext, scorer: CandidateScorer | None = None) -> tuple[list[Candidate], list[Candidate]]:
     """Devuelve (todos los candidatos puntuados, seleccionados)."""
     scorer = scorer or HeuristicScorer()
-    candidates = scorer.score(generate_candidates(ctx), ctx)
-    return sorted(candidates, key=lambda c: c.score, reverse=True), select_candidates(candidates, ctx)
+    generate = getattr(scorer, "generate", generate_candidates)      # Smart Highlights agrega anclas y su propia selección
+    select = getattr(scorer, "select", select_candidates)
+    candidates = scorer.score(generate(ctx), ctx)
+    return sorted(candidates, key=lambda c: c.score, reverse=True), select(candidates, ctx)

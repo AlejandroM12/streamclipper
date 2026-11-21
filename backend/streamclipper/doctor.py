@@ -37,6 +37,20 @@ def _ffmpeg_features(ffmpeg: Path) -> tuple[bool, bool]:
         return False, False
 
 
+def _visual_check(settings: Settings) -> dict:
+    """Prueba real del muestreo visual: FFmpeg genera un fotograma 96×54 en grises."""
+    from streamclipper.analysis.visual import H, MAX_SAMPLED_S, W
+    try:
+        out = subprocess.run([str(settings.ffmpeg), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=160x90:rate=2:duration=1",
+                              "-vf", f"scale={W}:{H}", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, timeout=20)
+        ok = out.returncode == 0 and len(out.stdout) == W * H
+    except (OSError, subprocess.SubprocessError, ToolNotFoundError):
+        ok = False
+    return _check("visual", "Análisis visual (Smart Highlights)", ok,
+                  f"disponible: fotogramas {W}×{H} en grises, solo en los candidatos y hasta ≈ {MAX_SAMPLED_S:.0f} s de video (opcional)" if ok
+                  else "no disponible: Smart Highlights seguirá funcionando solo con audio y transcripción", "ok" if ok else "warn")
+
+
 def run_doctor(settings: Settings) -> dict:
     checks = []
     v = sys.version_info
@@ -64,6 +78,11 @@ def run_doctor(settings: Settings) -> dict:
     if ram is not None:
         checks.append(_check("ram", "Memoria RAM libre", ram >= 1.5, f"{ram:.1f} GB libres (small necesita ≈ 1 GB; cerrá otros programas si hay poca)",
                              "ok" if ram >= 1.5 else "warn"))
+    checks.append(_visual_check(settings))
+    if ram is not None and ram < 2.0:
+        checks.append(_check("smart_ram", "Memoria para Smart Highlights", False,
+                             f"{ram:.1f} GB libres: Smart suma ≈ 100–200 MB al análisis y unos segundos de CPU; con poca RAM, cerrá otros programas "
+                             "o usá la detección clásica", "warn"))
     try:
         settings.data_dir.mkdir(parents=True, exist_ok=True)
         probe = settings.data_dir / ".write_test"

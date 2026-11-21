@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from streamclipper import __version__
-from streamclipper.app.manager import LANGUAGES, LAYOUTS, MODELS, JobManager
+from streamclipper.app.manager import DETECTORS, LANGUAGES, LAYOUTS, MODELS, JobManager
 from streamclipper.app.runners import session_dir
 from streamclipper.app.sessions import group_detail, list_sessions, rating_item, session_detail
 from streamclipper.core.config import Settings
@@ -124,6 +124,9 @@ def make_handler(ctx: AppContext):
                     return send_json(self, ctx.doctor())
                 if path == "/api/config":
                     return send_json(self, self._config())
+                if path == "/api/evaluation":
+                    from streamclipper.evaluation_smart import ratings_report
+                    return send_json(self, ratings_report(s))
                 if path == "/api/samples":
                     return send_json(self, self._samples())
                 if path == "/api/jobs":
@@ -176,6 +179,8 @@ def make_handler(ctx: AppContext):
                 ctx.session(m.group(1))
                 res = ctx.manager.delete_session(m.group(1))
                 return send_json(self, {"ok": True, **res})
+            if m := re.fullmatch(r"/api/sessions/([\w.-]+)/try-smart", path):
+                return send_json(self, self._try_smart(m.group(1), body), 201)
             if m := re.fullmatch(r"/api/sessions/([\w.-]+)/(subtitles|edit|rating|export)", path):
                 return self._session_post(m.group(1), m.group(2), body)
             if path == "/api/open-folder":
@@ -185,11 +190,11 @@ def make_handler(ctx: AppContext):
         def _config(self) -> dict:
             dl = DownloadLimits()
             return {
-                "version": __version__, "defaults": {"model": "small", "language": "es", "layout": "blur-fit", "max_clips": 3,
+                "version": __version__, "defaults": {"model": "small", "language": "es", "layout": "blur-fit", "max_clips": 3, "detector": "classic",
                                                      "platform": "universal"},
                 "models": [{"id": m, "cached": model_cached(m), "label": {"small": "small (recomendado)", "base": "base (más rápido)"}[m]}
                            for m in MODELS],
-                "languages": list(LANGUAGES), "layouts": list(LAYOUTS), "presets": list(PRESETS),
+                "detectors": list(DETECTORS), "languages": list(LANGUAGES), "layouts": list(LAYOUTS), "presets": list(PRESETS),
                 "platforms": ["universal", "tiktok", "reels", "shorts"],
                 "url_sources": ["YouTube", "Twitch", "Kick"], "url_limits": {"max_minutes": dl.max_duration_s / 60, "max_mb": dl.max_bytes // (1024 * 1024),
                                    "max_height": dl.max_height},
@@ -254,6 +259,19 @@ def make_handler(ctx: AppContext):
             validate_window(params.start, params.end, float(result["media"]["duration"]))
             job = ctx.manager.submit_edit(name, clip, {k: v for k, v in body.items() if k != "clip"})
             return send_json(self, job.to_dict(), 201)
+
+        def _try_smart(self, name: str, body: dict) -> dict:
+            """Procesa el mismo video con el otro detector, reutilizando la transcripción (no se retranscribe)."""
+            d = ctx.session(name)
+            result = load_result(d)
+            src, cfg = Path(result.get("source", "")), result.get("settings", {})
+            if not src.is_file():
+                raise ApiError(404, "El video original ya no está disponible.")
+            target = "classic" if cfg.get("detector") == "smart" else "smart"
+            params = {"model": cfg.get("whisper_model", "small"), "language": cfg.get("language") or "auto", "layout": cfg.get("layout", "blur-fit"),
+                      "max_clips": cfg.get("max_clips", 3), "platform": cfg.get("safe_platform", "universal"), "detector": target,
+                      "smart_visual": bool(body.get("smart_visual", True))}
+            return ctx.manager.submit_process(str(src), params, force=True).to_dict()
 
         def _window(self, body: dict, result: dict) -> tuple[float, float]:
             try:

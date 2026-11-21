@@ -30,6 +30,7 @@ from streamclipper.webutil import ApiError
 log = logging.getLogger("streamclipper.app")
 
 MODELS = ("small", "base")
+DETECTORS = ("classic", "smart")
 LAYOUTS = ("blur-fit", "focus")
 LANGUAGES = {"es": "es", "en": "en", "auto": None}
 _THROTTLE_S = 0.5   # el avance se guarda como mucho cada 0.5 s
@@ -153,7 +154,8 @@ class JobManager:
                 raise ApiError(400, str(e)) from None
             st = path.stat()
             kind, src_key, title, source = "file", f"file:{path}:{st.st_size}:{st.st_mtime_ns}", path.name, str(path)
-        dup_key = "|".join([src_key, params["model"], str(params["language"]), params["layout"], str(params["max_clips"])])
+        dup_key = "|".join([src_key, params["model"], str(params["language"]), params["layout"], str(params["max_clips"]),
+                            params["detector"], str(params["smart_visual"] if params["detector"] == "smart" else "")])
         self._check_duplicate(dup_key, force)
         self._check_capacity()
         job = AppJob(id=AppJob.new_id(), kind="process", title=title, input=source, input_kind=kind, params=params,
@@ -179,7 +181,7 @@ class JobManager:
             raise ApiError(400, str(e)) from None
         tag = ",".join(f"{s}-{e}" for s, e in spans)
         dup_key = "|".join([f"vod:{ref.platform}:{ref.video_id}", tag, params["model"], str(params["language"]), params["layout"],
-                            str(params["max_clips"])])
+                            str(params["max_clips"]), params["detector"], str(params["smart_visual"] if params["detector"] == "smart" else "")])
         self._check_duplicate(dup_key, force)
         self._check_capacity()
         title = info.get("title") or f"{ref.label} VOD {ref.video_id}"
@@ -227,12 +229,16 @@ class JobManager:
             raise ApiError(400, f"Presentación desconocida: {layout}")
         if not 1 <= max_clips <= 6:
             raise ApiError(400, "La cantidad de clips debe estar entre 1 y 6.")
+        detector = p.get("detector") or "classic"
+        if detector not in DETECTORS:
+            raise ApiError(400, "Detección desconocida (classic o smart).")
         platform = p.get("platform") or "universal"
         try:
             Settings(layout=layout, safe_platform=platform, max_clips=max_clips).validate()
         except InvalidInputError as e:
             raise ApiError(400, str(e)) from None
-        return {"model": model, "language": lang, "layout": layout, "max_clips": max_clips, "platform": platform}
+        return {"model": model, "language": lang, "layout": layout, "max_clips": max_clips, "platform": platform,
+                "detector": detector, "smart_visual": bool(p.get("smart_visual", True))}
 
     def _enqueue(self, job: AppJob) -> AppJob:
         with self._lock:

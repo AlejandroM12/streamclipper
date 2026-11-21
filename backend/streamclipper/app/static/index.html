@@ -80,6 +80,12 @@ async function api(url, body, method) {
 function toast(msg, ms) { const t = el("div", { class: "toast" }, msg); document.body.append(t); setTimeout(() => t.remove(), ms || 3500); }
 const hms = (t) => { t = Math.max(0, Math.floor(t || 0)); return String(Math.floor(t / 3600)).padStart(2, "0") + ":" + String(Math.floor(t % 3600 / 60)).padStart(2, "0") + ":" + String(t % 60).padStart(2, "0"); };
 const parseHms = (v) => { const m = /^(\d{1,3}):([0-5]\d):([0-5]\d)$/.exec(String(v || "").trim()); return m ? (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) : null; };
+const DETECTOR = { classic: "Clásica", smart: "Smart Highlights" };
+const SIGNAL = { intensidad_audio: "intensidad de audio", dinamica_audio: "subida brusca de audio", energia_contexto: "energía vs. los 30 s previos",
+  reaccion_vocal: "reacción vocal", risa_probable: "posible risa (no validada)", reaccion_verbal: "reacción verbal", frases: "frases de interés",
+  arco_narrativo: "planteamiento → desenlace", contexto: "contexto antes/después", duracion: "duración", calidad_transcripcion: "calidad de la transcripción",
+  visual: "cambio visual", musica_o_ruido: "ruido o música (resta)", audio_repetitivo: "audio repetitivo (resta)", aire_muerto: "aire muerto (resta)",
+  transcripcion_dudosa: "transcripción dudosa (resta)", frase_incompleta: "corte a mitad de frase (resta)" };
 const SEG_STATUS = { pending: "En espera", running: "En curso", done: "Listo", failed: "Falló", cancelled: "Cancelado" };
 const mm = (s) => { s = Math.max(0, s || 0); return Math.floor(s / 60) + ":" + (s % 60).toFixed(1).padStart(4, "0"); };
 const fdate = (t) => new Date(t * 1000).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" });
@@ -140,7 +146,7 @@ function jobCard(j) {
   const box = el("div", { class: "job" },
     el("h3", {}, j.title || j.id, "  ", el("span", { class: "badge " + j.status }, STATUS[j.status] || j.status),
       j.status === "queued" && j.queue_position ? el("span", { class: "mut small" }, "  posición " + j.queue_position + " en la cola") : null),
-    el("div", { class: "mut small" }, (j.kind === "edit" ? "Edición · " : isVod ? (j.params.platform_name || "") + " VOD por tramos · " : "Procesamiento · ") + fdate(j.created_at) + (j.params && j.params.model ? " · Whisper " + j.params.model : "")),
+    el("div", { class: "mut small" }, (j.kind === "edit" ? "Edición · " : isVod ? (j.params.platform_name || "") + " VOD por tramos · " : "Procesamiento · ") + fdate(j.created_at) + (j.params && j.params.model ? " · Whisper " + j.params.model : "") + (j.params && j.params.detector ? " · Detección " + (DETECTOR[j.params.detector] || j.params.detector) : "")),
     el("div", { class: "stages" }, j.stages.map(stageRow)));
   if (isVod) {
     const done = j.segments.filter((x) => x.status === "done").length;
@@ -183,7 +189,14 @@ async function viewNew(view) {
   let kind = "url";
   const url = el("input", { type: "text", placeholder: "https://www.youtube.com/watch?v=…  ·  twitch.tv/videos/…  ·  kick.com/…/videos/…", autocomplete: "off" });
   const path = el("input", { type: "text", placeholder: "C:\\ruta\\al\\video.mp4" });
-  const samples = el("select", {}), lang = el("select", {}), model = el("select", {}), layout = el("select", {}), platform = el("select", {});
+  const samples = el("select", {}), lang = el("select", {}), model = el("select", {}), layout = el("select", {}), platform = el("select", {}), detector = el("select", {});
+  const visual = el("input", { type: "checkbox", checked: true, style: "width:auto" });
+  const detInfo = el("div", { class: "mut small" });
+  for (const dkey of (CONFIG.detectors || ["classic"])) detector.append(el("option", { value: dkey, selected: dkey === (D.detector || "classic") }, dkey === "smart" ? "Smart Highlights (experimental)" : "Clásica (referencia)"));
+  const drawDet = () => detInfo.textContent = detector.value === "smart"
+    ? "Smart Highlights suma audio contextual, contexto de la transcripción y (opcional) imagen, y resta ruido, música y cortes pobres. Todavía NO está demostrado que supere a la clásica: revisá y valorá los clips."
+    : "Clásica: el ranking original (audio, reacción verbal, frases y calidad de transcripción). Es la referencia con la que se compara Smart Highlights.";
+  detector.addEventListener("change", drawDet); drawDet();
   const clips = el("input", { type: "number", min: 1, max: 6, value: D.max_clips });
   for (const l of CONFIG.languages) lang.append(el("option", { value: l, selected: l === D.language }, { es: "Español", en: "Inglés", auto: "Detectar automáticamente" }[l] || l));
   for (const m of CONFIG.models) model.append(el("option", { value: m.id, selected: m.id === D.model }, m.label + (m.cached ? "" : " — se descarga la primera vez")));
@@ -289,7 +302,7 @@ async function viewNew(view) {
   async function submit(force) {
     go.disabled = true;
     const segs = kind === "url" && segInfo ? segRows.map((r) => ({ start: r.start.trim(), end: r.end.trim() })) : null;
-    const params = { model: model.value, language: lang.value, layout: layout.value, max_clips: Number(clips.value), platform: platform.value };
+    const params = { model: model.value, language: lang.value, layout: layout.value, max_clips: Number(clips.value), platform: platform.value, detector: detector.value, smart_visual: visual.checked };
     try {
       await api("/api/jobs", { source: kind === "url" ? url.value : path.value, params, force: !!force, ...(segs ? { segments: segs } : {}) });
       toast("Trabajo agregado. El progreso aparece abajo.");
@@ -310,7 +323,9 @@ async function viewNew(view) {
     el("div", { class: "card" }, el("h2", {}, "Nuevo video"), el("div", { class: "seg" }, segBtns), urlBox, fileBox,
       el("div", { class: "row" }, el("div", {}, el("label", {}, "Idioma hablado"), lang), el("div", {}, el("label", {}, "Modelo Whisper"), model),
         el("div", {}, el("label", {}, "Cantidad de clips"), clips), el("div", {}, el("label", {}, "Presentación"), layout)),
-      el("details", {}, el("summary", {}, "Opciones avanzadas"), el("label", {}, "Márgenes seguros de la plataforma"), platform),
+      el("div", { class: "row" }, el("div", {}, el("label", {}, "Detección de momentos"), detector, detInfo)),
+      el("details", {}, el("summary", {}, "Opciones avanzadas"), el("label", {}, "Márgenes seguros de la plataforma"), platform,
+        el("label", { style: "display:flex;gap:8px;align-items:center" }, visual, "Smart Highlights: análisis visual ligero (muestreo limitado de fotogramas)")),
       el("div", { id: "formmsg" }), el("div", { class: "row", style: "margin-top:12px" }, go)),
     el("div", { class: "card" }, el("h2", {}, "Trabajos"), el("div", { id: "jobs" })));
   loadJobs();
@@ -370,11 +385,19 @@ async function viewSessions(view) {
 
 /* ---------- vista: estado del sistema ---------- */
 async function viewDoctor(view) {
+  if (!CONFIG) CONFIG = await api("/api/config");
   const d = await api("/api/doctor");
   view.replaceChildren(el("div", { class: "card" }, el("h2", {}, d.ok ? "Todo listo para funcionar" : "Hay problemas por resolver"),
     ...d.checks.map((c) => el("div", { class: "stage", style: "grid-template-columns:22px 260px 1fr" },
       el("span", { class: c.level === "ok" ? "ok" : c.level === "warn" ? "warn" : "err" }, c.level === "ok" ? "✓" : c.level === "warn" ? "!" : "✗"), el("strong", {}, c.label), el("span", { class: "mut small" }, c.detail))),
-    el("div", { class: "mut small", style: "margin-top:10px" }, "Datos en: " + (CONFIG ? CONFIG.data_dir : ""))));
+    el("div", { class: "mut small", style: "margin-top:10px" }, "Datos en: " + (CONFIG ? CONFIG.data_dir : ""))), await evaluationCard());
+}
+async function evaluationCard() {
+  let E; try { E = await api("/api/evaluation"); } catch (e) { return el("div", {}); }
+  const row = (k) => { const m = E.modes[k]; return el("div", { class: "small" }, el("strong", {}, DETECTOR[k] + ": "), m.rated + " clip(s) valorados en " + m.videos + " video(s) · good " + m.good + " · edit " + m.edit + " · bad " + m.bad + (m.good_rate != null ? " · tasa de «good» " + m.good_rate : "")); };
+  return el("div", { class: "card" }, el("h2", {}, "Evaluación de detectores (valoraciones humanas)"), row("classic"), row("smart"),
+    el("div", { class: "box warn" }, E.verdict), el("div", { class: "small mut" }, E.tuning.message),
+    el("div", { class: "small mut" }, "Las valoraciones solo existen para clips que viste: los clips que un detector NO eligió casi nunca están valorados, así que los falsos negativos no se pueden medir. Valorá clips de ambos modos en el mismo video (botón «Probar con el otro detector» en la galería)."));
 }
 
 /* ---------- vista: sesión (galería) ---------- */
@@ -402,9 +425,16 @@ async function buildSession(id, refresh) {
   const head = el("div", { class: "card" }, el("h2", {}, sess.title),
     el("div", { class: "mut small" }, fdate(sess.created) + " · Whisper " + sess.model + " · " + sess.clips + " clip(s) · " + (sess.video_seconds ? Math.round(sess.video_seconds / 60 * 10) / 10 + " min de video" : "")),
     el("div", { class: "mut small" }, sess.source),
+    el("div", { class: "small" }, el("strong", {}, "Detección: "), DETECTOR[sess.detector] || sess.detector,
+      D.detector && D.detector.effective && !String(D.detector.effective).startsWith("smart") && sess.detector === "smart" ? " — " + D.detector.effective : "",
+      sess.reused_transcript ? " · transcripción reutilizada (no se retranscribió)" : ""),
+    D.detector && D.detector.missing && D.detector.missing.length ? el("div", { class: "small warn" }, "Señales no disponibles en este análisis: " + D.detector.missing.join("; ")) : null,
     D.warnings.length ? el("details", {}, el("summary", {}, D.warnings.length + " aviso(s) del procesamiento"), ...D.warnings.slice(0, 20).map((w) => el("div", { class: "small warn" }, "⚠ " + w))) : null,
     el("div", { class: "row", style: "margin-top:10px" },
       el("button", { class: "primary fix", onclick: doExport }, "Exportar los clips marcados (MP4 + SRT)"),
+      el("button", { class: "fix", title: "Procesa el mismo video con el otro detector reutilizando la transcripción", disabled: !D.has_source, onclick: async () => {
+        try { await api("/api/sessions/" + encodeURIComponent(id) + "/try-smart", {}); toast("Trabajo agregado. Seguilo en «Nuevo» → Trabajos."); } catch (e) { toast(e.message, 6000); }
+      } }, "Probar con " + (sess.detector === "smart" ? "la detección clásica" : "Smart Highlights")),
       el("span", { class: "mut small" }, "Marcá «Exportar» en cada clip. Se copian a la carpeta de exportación sin tocar los originales.")), out);
   async function doExport() {
     const selections = [...sel].map((k) => { const [clip, version] = k.split("|"); return { clip, version }; });
@@ -446,7 +476,15 @@ async function buildSession(id, refresh) {
           (v.issues || []).length ? el("details", { open: true }, el("summary", {}, (v.issues.length) + " aviso(s) de esta versión"), ...v.issues.slice(0, 8).map((x) => el("div", { class: "small warn" }, "⚠ " + x))) : null,
           el("details", {}, el("summary", {}, "Transcripción y confianza"), el("div", { class: "tx" }, c.transcript || "(sin habla transcrita)"),
             el("div", { class: "mut small" }, conf.words + " palabras · prob. media " + conf.mean_word_prob + " · " + conf.words_below_0_4_pct + " % con baja confianza" + (conf.low_confidence_words.length ? " (" + conf.low_confidence_words.slice(0, 8).join(", ") + ")" : ""))),
-          el("details", {}, el("summary", {}, "Por qué se eligió este momento"), ...c.reasons.map((r) => el("div", { class: "small mut" }, r.name + " " + r.value + " — " + r.note)),
+          el("details", {}, el("summary", {}, "Por qué se eligió este momento"),
+            ...(c.reasons.some((r) => r.weight != null && r.weight < 0) || sess.detector === "smart" ? [
+              el("div", { class: "small" }, el("strong", {}, "Suman")),
+              ...c.reasons.filter((r) => !(r.weight < 0) && r.value > 0).sort((a, b) => b.contribution - a.contribution).map((r) => el("div", { class: "small mut" }, "+" + (r.contribution || 0).toFixed(3) + " " + (SIGNAL[r.name] || r.name) + " (valor " + r.value.toFixed(2) + " × peso " + (r.weight || 0).toFixed(2) + ") — " + r.note)),
+              el("div", { class: "small", style: "margin-top:4px" }, el("strong", {}, "Restan")),
+              ...c.reasons.filter((r) => r.weight < 0 && r.value > 0).map((r) => el("div", { class: "small warn" }, (r.contribution || 0).toFixed(3) + " " + (SIGNAL[r.name] || r.name) + " (valor " + r.value.toFixed(2) + ") — " + r.note)),
+              ...(c.reasons.some((r) => r.weight < 0 && r.value > 0) ? [] : [el("div", { class: "small mut" }, "Ninguna penalización aplicó a este momento.")]),
+              el("div", { class: "small mut", style: "margin-top:4px" }, "Los pesos son priores fijados a priori (no aprendidos). La puntuación es un ranking relativo dentro del video, no una probabilidad.")
+            ] : c.reasons.map((r) => el("div", { class: "small mut" }, r.name + " " + r.value + " — " + r.note))),
             ...c.refine_notes.map((n) => el("div", { class: "small mut" }, "Corte: " + n)))));
     };
     vsel.addEventListener("change", draw);

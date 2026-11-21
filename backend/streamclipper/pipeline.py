@@ -16,12 +16,14 @@ from streamclipper.core.errors import CancelledError, InvalidInputError, MediaEr
 from streamclipper.core.log import log_event, setup_logging
 from streamclipper.core.memory import ResourceMonitor
 from streamclipper.core.sysinfo import available_ram_gb
+from streamclipper.models import Transcript
 from streamclipper.media.ffmpeg import extract_audio, probe
 from streamclipper.render.clips import render_set
 from streamclipper.report import write_reports
 from streamclipper.selection.base import AnalysisContext, CandidateScorer
 from streamclipper.selection.refine import refine_selected
 from streamclipper.selection.selector import find_clips, selection_report
+from streamclipper.selection.smart import build_smart_scorer
 from streamclipper.transcription.sentences import split_sentences
 from streamclipper.transcription.whisper import transcribe
 
@@ -71,6 +73,24 @@ def settings_from_result(result: dict, **overrides) -> Settings:
     d["data_dir"] = Path(d["data_dir"])
     d.update(overrides)
     return Settings(**d)
+
+
+def find_reusable_transcript(settings: Settings, source_fingerprint: str):
+    """(Transcript, job_id) de un job anterior COMPLETADO del mismo video, modelo e idioma con evidencia de Whisper
+    completa (versión 2) y palabras; None si no hay. Evita retranscribir lo que ya se transcribió."""
+    best = None
+    for d in settings.jobs_dir.iterdir() if settings.jobs_dir.is_dir() else []:
+        try:
+            res = json.loads((d / "result.json").read_text(encoding="utf-8"))
+            if (res.get("source_fingerprint") != source_fingerprint or res.get("status") != "completed" or res.get("rescored_from")
+                    or res["settings"].get("whisper_model") != settings.whisper_model or res["settings"].get("language") != settings.language):
+                continue
+            tr = Transcript.from_dict(json.loads((d / "transcript.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError, KeyError):
+            continue
+        if tr.has_whisper_stats and any(s.words for s in tr.segments) and (best is None or d.name > best[1]):
+            best = (tr, d.name)
+    return best
 
 
 def run_pipeline(
@@ -155,10 +175,16 @@ def run_pipeline(
                 extract_audio(src, wav, settings.ffmpeg, cancel)
 
             with stage("transcribir"):
-                transcript = transcribe(
-                    wav, settings, cancel, info.duration,
-                    lambda f: progress("transcribir", f, f"{f * info.duration:.0f}s / {info.duration:.0f}s"))
-                transcript = split_sentences(transcript)
+                reused = find_reusable_transcript(settings, result["source_fingerprint"]) if settings.reuse_transcript else None
+                if reused:
+                    transcript = reused[0]
+                    result["transcript_reused_from"] = reused[1]
+                    progress("transcribir", 1.0, f"transcripción reutilizada de {reused[1]} (no se retranscribe)")
+                else:
+                    transcript = transcribe(
+                        wav, settings, cancel, info.duration,
+                        lambda f: progress("transcribir", f, f"{f * info.duration:.0f}s / {info.duration:.0f}s"))
+                    transcript = split_sentences(transcript)
                 (job_dir / "transcript.json").write_text(
                     json.dumps(transcript.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
                 n_words = sum(len(s.words) for s in transcript.segments)
@@ -172,7 +198,12 @@ def run_pipeline(
 
             with stage("seleccionar"):
                 ctx = AnalysisContext(transcript, curve, info.duration, settings)
-                candidates, chosen = find_clips(ctx, scorer)
+                use_scorer = scorer
+                if use_scorer is None and settings.detector == "smart":
+                    use_scorer = build_smart_scorer(wav, curve, src, settings, cancel, warn)
+                candidates, chosen = find_clips(ctx, use_scorer)
+                result["detector"] = use_scorer.info() if hasattr(use_scorer, "info") else {
+                    "requested": settings.detector, "effective": "clásico"}
                 for rank, c in enumerate(candidates, 1):
                     c.rank = rank
                 result["candidates"] = [c.to_dict() for c in candidates]

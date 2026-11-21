@@ -117,6 +117,13 @@ def _build_parser() -> argparse.ArgumentParser:
     rs.add_argument("--evaluate", action="store_true", help="Imprime y guarda la evaluación antes/después")
     _add_lexicon_args(rs)
 
+    se2 = sub.add_parser("smart-eval", help="Compara el ranking clásico y Smart Highlights en memoria (sin renderizar ni retranscribir)")
+    se2.add_argument("jobs", nargs="*", help="Jobs a evaluar (por defecto, todas las sesiones reales utilizables)")
+    se2.add_argument("--no-visual", action="store_true", help="Sin análisis visual")
+    se2.add_argument("--out", help="Guarda el informe Markdown en esta ruta")
+    se2.add_argument("--json", help="Guarda los datos (línea base reproducible) en esta ruta")
+    se2.add_argument("--tune", action="store_true", help="Ajuste automático de pesos (DESHABILITADO hasta tener datos suficientes)")
+
     ev = sub.add_parser("evaluate", help="Evalúa antes/después: job original vs job re-puntuado")
     ev.add_argument("old")
     ev.add_argument("new")
@@ -385,6 +392,30 @@ def main(argv: list[str] | None = None) -> int:
                 data, text = evaluate_jobs(old_name, res["job_id"], s)
                 print("\n" + text)
                 print(f"Guardado en {save_comparison(text, old_name, res['job_id'], s, kind='eval')}")
+            return 0
+
+        if args.cmd == "smart-eval":
+            from streamclipper import evaluation_smart as es
+            s = Settings()
+            if args.tune:
+                print(es.tuning_readiness(s)["message"])
+                return 2
+            dirs = [resolve_job(j, s) for j in args.jobs] if args.jobs else es.corpus(s)
+            rows = []
+            for d in dirs:
+                print(f"Evaluando {d.name} …", flush=True)
+                try:
+                    rows.append(es.evaluate_session(d, s, visual=not args.no_visual))
+                except Exception as e:  # noqa: BLE001  una sesión no evaluable no detiene el resto
+                    print(f"  omitida: {e}")
+            text = es.render_markdown(rows, es.ratings_report(s))
+            print("\n" + text)
+            if args.out:
+                Path(args.out).write_text(text, encoding="utf-8")
+                print(f"Informe guardado en {args.out}")
+            if args.json:
+                Path(args.json).write_text(json.dumps({"rows": rows, "ratings": es.ratings_report(s)}, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
+                print(f"Datos guardados en {args.json}")
             return 0
 
         if args.cmd == "evaluate":

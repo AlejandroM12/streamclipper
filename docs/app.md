@@ -65,6 +65,14 @@ segundos. La duración real se mide con FFprobe (que además exige video y audio
 pedida) y queda en `data\samples\<archivo>.source.json` (`measured_duration_s`, `extra_seconds`). Los tramos se guardan como
 `data\samples\<plataforma>-vod-<id>_<HHMMSS>-<HHMMSS>.mp4`.
 
+## Detección de momentos: Clásica o Smart Highlights
+
+En *Nuevo* se elige el modo de **Detección de momentos**. **Clásica** (por defecto) es el ranking original y la referencia.
+**Smart Highlights** (experimental) suma audio contextual, contexto de la transcripción y, opcionalmente, imagen, y resta ruido,
+música y cortes pobres. **Todavía no está demostrado que supere a la clásica**: ver [smart-highlights.md](smart-highlights.md).
+Un video ya transcrito (mismo modelo e idioma) **no se retranscribe**. En la galería, *Probar con Smart Highlights* procesa el mismo
+video con el otro detector para poder compararlos y valorar ambos.
+
 ## Seguridad y límites
 
 - Escucha solo en loopback; se rechaza cualquier `Host` que no sea local y las escrituras exigen JSON.

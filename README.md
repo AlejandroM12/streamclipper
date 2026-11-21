@@ -7,7 +7,7 @@ La calidad de selección con gameplay real **aún no está validada**: ver [docs
 ## Inicio rápido (Windows 11)
 
 Doble clic en `instalar.bat` (una vez) y luego en `iniciar_streamclipper.bat`; se abre la aplicación en el navegador.
-Guía completa: [docs/app.md](docs/app.md). Lo siguiente es la instalación manual y la CLI.
+Guía completa: [docs/app.md](docs/app.md). Detector experimental: [docs/smart-highlights.md](docs/smart-highlights.md). Lo siguiente es la instalación manual y la CLI.
 
 ## Instalación manual
 
