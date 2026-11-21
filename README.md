@@ -49,7 +49,12 @@ cd backend
   después de la reacción y conserva contexto previo solo cuando hace falta.
 - **Presentación 1080×1920:** gameplay y subtítulos dentro de márgenes seguros aproximados (`--platform tiktok|reels|shorts`),
   presets `blur-fit` / `focus` / `fill` / `crop`, fondo desenfocado configurable (`--bg-blur`, `--bg-dim`).
-- `rerender` escribe `rerender_<tag>.md` con la comparación por clip (duración, límites, subtítulos, avisos, render, memoria).
+- **Duración del clip final:** 8–30 s por defecto (`--refine-min-clip`, `--refine-max-clip`); solo se alarga hasta el mínimo exacto.
+  Fades de audio mínimos en los bordes cuando el corte cae sobre sonido (la voz no se modifica; `--no-fades`).
+- **Encuadre conservador:** `--keep x,y,w,h` (repetible) declara a mano regiones a no recortar (facecam, HUD); `focus` limita el
+  zoom para que quepan. No hay detección visual. `blur-fit` sigue siendo la alternativa segura.
+- `rerender` escribe `rerender_<tag>.md` con la comparación por clip (duración, límites, subtítulos, avisos, encuadre, render,
+  memoria) y `variants` compara el original con todas las versiones generadas.
 
 ### Validación con gameplay real y revisión humana
 
