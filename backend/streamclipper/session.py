@@ -16,7 +16,7 @@ from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
 from streamclipper.core.errors import InvalidInputError
 from streamclipper.jobs import load_result, resolve_job
-from streamclipper.media.download import DownloadLimits, download_youtube, looks_like_url
+from streamclipper.media.download import DownloadLimits, download_media, looks_like_url
 from streamclipper.pipeline import run_pipeline
 from streamclipper.review import (
     algorithm_info, build_items, render_session_report, reviews_dir, write_alternatives,
@@ -43,7 +43,7 @@ def run_session(
     if not models:
         raise InvalidInputError("Indicá al menos un modelo")
     if looks_like_url(input_):
-        res = download_youtube(input_, settings, limits or DownloadLimits(), on_exists="reuse", cancel=cancel,
+        res = download_media(input_, settings, limits or DownloadLimits(), on_exists="reuse", cancel=cancel,
                                progress=progress)
         source = str(res.path)
     else:

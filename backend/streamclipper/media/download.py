@@ -1,9 +1,10 @@
-"""Descarga de videos públicos de YouTube con yt-dlp (API de Python, nunca shell).
+"""Descarga de videos públicos de YouTube, Twitch y Kick con yt-dlp (API de Python, nunca shell).
 
-Alcance deliberadamente estrecho: solo URLs HTTPS de YouTube/Shorts de un único video. Se valida la URL, se
-consulta la metadata (duración, tamaño estimado, disponibilidad) ANTES de descargar y el archivo resultante se
-verifica con FFprobe. No se usan cookies ni se intenta saltar restricciones de acceso, DRM o controles de la
-plataforma: si el video no es accesible públicamente, se informa y se aborta.
+Alcance deliberadamente estrecho: solo URLs HTTPS de un único video de YouTube/Shorts, un VOD (grabación) o un clip de
+Twitch, o un VOD o un clip de Kick. Se valida la URL, se consulta la metadata (duración, tamaño estimado,
+disponibilidad) ANTES de descargar y el archivo resultante se verifica con FFprobe. No hay transmisiones en vivo, no se
+usan cuentas, contraseñas ni cookies y no se intenta saltar restricciones de acceso, DRM o controles de la plataforma:
+si el video no es accesible públicamente, se informa y se aborta.
 """
 import json
 import os
@@ -22,7 +23,16 @@ from streamclipper.core.log import log_event
 from streamclipper.media.ffmpeg import probe
 
 ALLOWED_HOSTS = frozenset({"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"})
+TWITCH_HOSTS = frozenset({"twitch.tv", "www.twitch.tv", "m.twitch.tv", "go.twitch.tv", "clips.twitch.tv"})
+KICK_HOSTS = frozenset({"kick.com", "www.kick.com"})
+PLATFORM_LABELS = {"youtube": "YouTube", "twitch": "Twitch", "kick": "Kick"}
+KIND_LABELS = {"watch": "video", "shorts": "short", "short-link": "video", "vod": "grabación (VOD)", "clip": "clip"}
 _VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_TWITCH_VOD_ID = re.compile(r"^\d{1,12}$")
+_TWITCH_CLIP_SLUG = re.compile(r"^[A-Za-z0-9_-]{5,120}$")
+_KICK_CHANNEL = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+_KICK_VOD_ID = re.compile(r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
+_KICK_CLIP_ID = re.compile(r"^clip_[A-Za-z0-9_-]{5,60}$")
 _MAX_URL_LEN = 300
 _BLOCKED_AVAILABILITY = {
     "private": "es privado",
@@ -47,8 +57,22 @@ class DownloadLimits:
 class VideoRef:
     video_id: str
     canonical_url: str
-    kind: str                  # watch | shorts | short-link
+    kind: str                  # YouTube: watch | shorts | short-link; Twitch y Kick: vod | clip
     ignored_playlist: bool = False
+    platform: str = "youtube"  # youtube | twitch | kick
+
+    @property
+    def label(self) -> str:
+        return PLATFORM_LABELS[self.platform]
+
+    @property
+    def kind_label(self) -> str:
+        return KIND_LABELS[self.kind]
+
+    @property
+    def file_prefix(self) -> str:
+        """Prefijo del archivo en data/samples. YouTube conserva `youtube-<id>`; el resto distingue VOD de clip."""
+        return "youtube" if self.platform == "youtube" else f"{self.platform}-{self.kind}"
 
 
 @dataclass
@@ -63,11 +87,12 @@ class DownloadResult:
     reused: bool = False
     dry_run: bool = False
     warnings: list[str] = field(default_factory=list)
+    platform: str = "youtube"
 
 
 # --- validación de la URL ----------------------------------------------------------------------
-def parse_youtube_url(url: str) -> VideoRef:
-    """Valida y normaliza la URL. Lanza InvalidInputError con un mensaje claro si no se acepta."""
+def _split_url(url: str):
+    """Validaciones comunes a todas las plataformas. Devuelve (partes, host en minúsculas)."""
     raw = url.strip()
     if not raw:
         raise InvalidInputError("La URL está vacía")
@@ -87,9 +112,100 @@ def parse_youtube_url(url: str) -> VideoRef:
         raise InvalidInputError("La URL no puede incluir credenciales")
     if port not in (None, 443):
         raise InvalidInputError("La URL no puede usar un puerto distinto de 443")
+    return parts, host or raw
+
+
+def parse_media_url(url: str) -> VideoRef:
+    """Detecta la plataforma por el dominio exacto y valida la URL. Solo un video, un VOD o un clip: nada de listas,
+    canales ni directos. Lanza InvalidInputError con un mensaje claro si no se acepta."""
+    parts, host = _split_url(url)
+    if host in ALLOWED_HOSTS:
+        return parse_youtube_url(url)
+    if host in TWITCH_HOSTS:
+        return _parse_twitch(parts, host)
+    if host in KICK_HOSTS:
+        return _parse_kick(parts)
+    raise InvalidInputError(f"Dominio no permitido: '{host}'. Se aceptan YouTube (youtube.com, youtu.be), "
+                            "Twitch (twitch.tv, clips.twitch.tv) y Kick (kick.com)")
+
+
+_NOT_A_VOD = ("Esa URL no es un VOD ni un clip. Se aceptan: {fmt}. "
+              "No se aceptan canales, listas, colecciones ni transmisiones en vivo.")
+
+
+def _parse_twitch(parts, host: str) -> VideoRef:
+    segs = [s for s in parts.path.split("/") if s]
+    query = parse_qs(parts.query, keep_blank_values=True)
+    fmt = "twitch.tv/videos/<id> y clips.twitch.tv/<clip>"
+    ignored = "collection" in query
+
+    def vod(vid: str) -> VideoRef:
+        return VideoRef(vid, f"https://www.twitch.tv/videos/{vid}", "vod", ignored, "twitch")
+
+    def clip(slug: str) -> VideoRef:
+        return VideoRef(slug, f"https://clips.twitch.tv/{slug}", "clip", False, "twitch")
+
+    if host == "clips.twitch.tv":
+        slug = None
+        if segs == ["embed"] and len(query.get("clip", [])) == 1:
+            slug = query["clip"][0]
+        elif len(segs) in (1, 2) and segs[0] != "embed":
+            slug = segs[-1]
+        if slug is None:
+            raise InvalidInputError(_NOT_A_VOD.format(fmt=fmt))
+        if not _TWITCH_CLIP_SLUG.match(slug):
+            raise InvalidInputError("El identificador del clip de Twitch no es válido")
+        return clip(slug)
+    if len(segs) == 2 and segs[0] == "videos" and segs[1].isdigit() or (len(segs) == 3 and segs[1] in ("v", "video")):
+        vid = segs[-1]
+        if not _TWITCH_VOD_ID.match(vid):
+            raise InvalidInputError("El identificador del VOD de Twitch no es válido (se esperan solo dígitos)")
+        return vod(vid)
+    if (len(segs) == 3 and segs[1] == "clip") or (len(segs) == 2 and segs[0] == "clip"):
+        if not _TWITCH_CLIP_SLUG.match(segs[-1]):
+            raise InvalidInputError("El identificador del clip de Twitch no es válido")
+        return clip(segs[-1])
+    if segs[:1] in (["collections"], ["directory"]) or segs[-1:] in (["videos"], ["clips"], ["collections"]):
+        raise InvalidInputError("No se aceptan listas, colecciones ni páginas de canal: indicá la URL de un VOD o de un clip")
+    if len(segs) == 1:
+        raise InvalidInputError("Esa URL es de un canal de Twitch (transmisión en vivo). No se aceptan directos: "
+                                "usá la URL de un VOD (twitch.tv/videos/<id>) o de un clip")
+    raise InvalidInputError(_NOT_A_VOD.format(fmt=fmt))
+
+
+def _parse_kick(parts) -> VideoRef:
+    segs = [s for s in parts.path.split("/") if s]
+    query = parse_qs(parts.query, keep_blank_values=True)
+    fmt = "kick.com/<canal>/videos/<id> y kick.com/<canal>/clips/<clip>"
+    if not segs or not _KICK_CHANNEL.match(segs[0]) or segs[0].lower() in ("video", "categories", "search", "auth", "browse"):
+        raise InvalidInputError(_NOT_A_VOD.format(fmt=fmt))
+    chan = segs[0]
+    if len(segs) == 3 and segs[1] == "videos":
+        if not _KICK_VOD_ID.match(segs[2]):
+            raise InvalidInputError("El identificador del VOD de Kick no es válido")
+        vid = segs[2].lower()
+        return VideoRef(vid, f"https://kick.com/{chan}/videos/{vid}", "vod", False, "kick")
+    clip_id = segs[2] if len(segs) == 3 and segs[1] == "clips" else None
+    if len(segs) == 1 and len(query.get("clip", [])) == 1:
+        clip_id = query["clip"][0]
+    if clip_id is not None:
+        if not _KICK_CLIP_ID.match(clip_id):
+            raise InvalidInputError("El identificador del clip de Kick no es válido")
+        return VideoRef(clip_id, f"https://kick.com/{chan}/clips/{clip_id}", "clip", False, "kick")
+    if segs[1:] in (["videos"], ["clips"]):
+        raise InvalidInputError("No se aceptan listas de videos o clips de un canal: indicá la URL de un VOD o de un clip")
+    if len(segs) == 1:
+        raise InvalidInputError("Esa URL es de un canal de Kick (transmisión en vivo). No se aceptan directos: "
+                                "usá la URL de un VOD (kick.com/<canal>/videos/<id>) o de un clip")
+    raise InvalidInputError(_NOT_A_VOD.format(fmt=fmt))
+
+
+def parse_youtube_url(url: str) -> VideoRef:
+    """Valida y normaliza la URL. Lanza InvalidInputError con un mensaje claro si no se acepta."""
+    parts, host = _split_url(url)
     if host not in ALLOWED_HOSTS:
         raise InvalidInputError(
-            f"Dominio no permitido: '{host or raw}'. Por ahora solo YouTube (youtube.com, youtu.be)")
+            f"Dominio no permitido: '{host}'. Por ahora solo YouTube (youtube.com, youtu.be)")
 
     query = parse_qs(parts.query, keep_blank_values=True)
     has_list = "list" in query
@@ -139,8 +255,13 @@ def check_info(info: dict, limits: DownloadLimits) -> int | None:
         raise InvalidInputError(
             f"El video dura {duration / 60:.1f} min; el máximo permitido es {limits.max_duration_s / 60:.0f} min")
 
-    sizes = [f.get("filesize") or f.get("filesize_approx") for f in (info.get("requested_formats") or [info])]
+    fmts = info.get("requested_formats") or [info]
+    sizes = [f.get("filesize") or f.get("filesize_approx") for f in fmts]
     estimated = sum(sizes) if sizes and all(sizes) else None
+    if estimated is None:   # HLS (Twitch, Kick) no informa el tamaño: se estima con la tasa de bits y la duración
+        rates = [f.get("tbr") for f in fmts]
+        if rates and all(rates):
+            estimated = sum(rates) * 125 * duration
     if estimated and estimated > limits.max_bytes:
         raise InvalidInputError(
             f"Tamaño estimado {estimated / 1e6:.0f} MB; el máximo permitido es {limits.max_bytes / 1e6:.0f} MB")
@@ -149,9 +270,16 @@ def check_info(info: dict, limits: DownloadLimits) -> int | None:
 
 _ERROR_HINTS = [
     (r"private video", "El video es privado"),
-    (r"video unavailable|has been removed|no longer available|does not exist|account.*terminated",
-     "El video no está disponible (eliminado, o la cuenta fue cerrada)"),
+    (r"video unavailable|has been removed|no longer available|does not exist|account.*terminated|"
+     r"not_found|resource not found|http error 404",
+     "El video no está disponible (eliminado, vencido, o la cuenta fue cerrada)"),
     (r"members[- ]only|join this channel", "El video es solo para miembros del canal"),
+    (r"subscriber-only|requires a channel subscription|logged into an account|login required|log in|"
+     r"authentication|unauthorized|vod_manifest_restricted",
+     "El contenido es solo para suscriptores o requiere iniciar sesión. StreamClipper no usa cuentas, "
+     "contraseñas ni cookies, así que no se puede descargar"),
+    (r"cloudflare|just a moment|impersonat|http error 403",
+     "La plataforma bloqueó la consulta automática (protección anti-bot); probá más tarde. No se evade el control"),
     (r"sign in to confirm your age|age[- ]restricted|inappropriate for some users",
      "El video tiene restricción de edad y requiere iniciar sesión (no soportado)"),
     (r"available in your country|blocked.{0,40}country|geo.?restrict|geo.?block",
@@ -162,7 +290,7 @@ _ERROR_HINTS = [
     (r"premieres in|live event will begin", "El video es un estreno/directo aún no disponible"),
     (r"drm|protected", "El video está protegido (DRM) y no se puede descargar"),
     (r"unable to download webpage|timed out|connection|getaddrinfo|network is unreachable",
-     "No se pudo conectar con YouTube; revisá tu conexión"),
+     "No se pudo conectar con la plataforma; revisá tu conexión"),
     (r"requested format is not available|no video formats",
      "No hay un formato compatible disponible para este video"),
 ]
@@ -181,7 +309,8 @@ def explain_download_error(message: str) -> str:
 def _format_selector(max_height: int) -> str:
     h = f"[height<={max_height}]"
     # H.264 primero (decodifica y renderiza más rápido en CPU que AV1/VP9), con alternativas
-    return (f"bv*{h}[vcodec^=avc1]+ba[ext=m4a]/bv*{h}[ext=mp4]+ba[ext=m4a]/b{h}[ext=mp4]/b{h}")
+    u = f"[height<=?{max_height}]"   # «?»: acepta formatos sin altura informada (clips de Kick); los que la informan se filtran igual
+    return (f"bv*{h}[vcodec^=avc1]+ba[ext=m4a]/bv*{h}[ext=mp4]+ba[ext=m4a]/b{h}[ext=mp4]/b{h}/b{u}[ext=mp4]/b{u}")
 
 
 def _default_factory(opts: dict):
@@ -193,11 +322,17 @@ def samples_dir(settings: Settings) -> Path:
     return settings.data_dir / "samples"
 
 
-def target_path(settings: Settings, video_id: str) -> Path:
-    return samples_dir(settings) / f"youtube-{video_id}.mp4"  # el nombre sale solo del id ya validado
+def target_path(settings: Settings, video_id: str, prefix: str = "youtube") -> Path:
+    return samples_dir(settings) / f"{prefix}-{video_id}.mp4"  # el nombre sale solo del id y del prefijo ya validados
 
 
-def download_youtube(
+def download_youtube(url: str, *args, **kwargs) -> DownloadResult:
+    """Igual que download_media pero solo acepta YouTube (compatibilidad con el código y la CLI anteriores)."""
+    parse_youtube_url(url)
+    return download_media(url, *args, **kwargs)
+
+
+def download_media(
     url: str,
     settings: Settings,
     limits: DownloadLimits | None = None,
@@ -215,11 +350,11 @@ def download_youtube(
     if on_exists not in ("error", "reuse", "overwrite"):
         raise ValueError(on_exists)
 
-    ref = parse_youtube_url(url)
+    ref = parse_media_url(url)
     warnings = []
     if ref.ignored_playlist:
-        warnings.append("La URL incluía una lista de reproducción: se ignora y se procesa solo el video indicado")
-    final = target_path(settings, ref.video_id)
+        warnings.append("La URL incluía una lista o colección: se ignora y se procesa solo el video indicado")
+    final = target_path(settings, ref.video_id, ref.file_prefix)
 
     if final.exists() and not dry_run:
         if on_exists == "error":
@@ -231,7 +366,7 @@ def download_youtube(
             return DownloadResult(final, ref.video_id, duration=info.duration, size_bytes=info.size_bytes,
                                   reused=True, warnings=warnings)
 
-    tmp = samples_dir(settings) / f".downloading-{ref.video_id}"
+    tmp = samples_dir(settings) / f".downloading-{ref.file_prefix}-{ref.video_id}"
     state = {"last": -1.0}
 
     def hook(d: dict) -> None:
@@ -252,7 +387,7 @@ def download_youtube(
         "restrictfilenames": True, "max_filesize": limits.max_bytes,
         "socket_timeout": 30, "retries": 3, "fragment_retries": 3,
         "progress_hooks": [hook], "ffmpeg_location": str(settings.ffmpeg.parent),
-        "ignoreconfig": True,
+        "ignoreconfig": True, "usenetrc": False,   # sin config, netrc, cuentas ni cookies: solo contenido público
     }
 
     try:
@@ -262,9 +397,9 @@ def download_youtube(
             estimated = check_info(info, limits)
             meta = DownloadResult(final, ref.video_id, title=info.get("title"), duration=info.get("duration"),
                                   estimated_bytes=estimated, license=info.get("license"),
-                                  dry_run=dry_run, warnings=warnings)
+                                  dry_run=dry_run, warnings=warnings, platform=ref.platform)
             if estimated is None:
-                warnings.append("YouTube no informó el tamaño: se aplica el límite durante la descarga")
+                warnings.append(f"{ref.label} no informó el tamaño: se aplica el límite durante la descarga")
             if dry_run:
                 return meta
             samples_dir(settings).mkdir(parents=True, exist_ok=True)
@@ -275,9 +410,10 @@ def download_youtube(
             ydl.process_ie_result(info, download=True)
 
         cancel.check()
-        produced = tmp / f"{ref.video_id}.mp4"
-        if not produced.is_file():
+        found = sorted(tmp.glob("*.mp4"))   # el nombre lo decide yt-dlp (el id real puede diferir del de la URL en Twitch)
+        if len(found) != 1:
             raise MediaError("No se generó el MP4 (¿superó el tamaño máximo o no hay formato compatible?)")
+        produced = found[0]
         size = produced.stat().st_size
         if size > limits.max_bytes:
             raise MediaError(f"El archivo descargado pesa {size / 1e6:.0f} MB y supera el máximo permitido")
@@ -312,10 +448,39 @@ def download_youtube(
 def _write_sidecar(final: Path, ref: VideoRef, info: dict, size: int) -> None:
     """Registro de procedencia junto al video, para poder revisar de dónde salió y bajo qué licencia."""
     data = {
-        "source_url": ref.canonical_url, "video_id": ref.video_id, "title": info.get("title"),
+        "source_url": ref.canonical_url, "platform": ref.platform, "kind": ref.kind, "video_id": ref.video_id,
+        "title": info.get("title"),
         "uploader": info.get("uploader"), "duration_s": info.get("duration"), "license": info.get("license"),
         "upload_date": info.get("upload_date"), "size_bytes": size,
         "downloaded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "note": "Descargado con yt-dlp para uso personal; el usuario es responsable de contar con autorización.",
     }
     final.with_suffix(".source.json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def inspect_media(url: str, limits: DownloadLimits | None = None, ydl_factory: Callable[[dict], object] | None = None) -> dict:
+    """Plataforma, título y duración de una URL ANTES de procesarla, sin descargar nada. Si la URL es válida pero el video
+    no cumple los límites (o no es accesible), se devuelve igualmente lo que se sepa y el motivo en `reason`."""
+    limits = limits or DownloadLimits()
+    ref = parse_media_url(url)           # una URL inválida o de otro dominio lanza InvalidInputError: nunca llega a la red
+    out = {"platform": ref.platform, "platform_label": ref.label, "kind": ref.kind, "kind_label": ref.kind_label,
+           "video_id": ref.video_id, "canonical_url": ref.canonical_url, "title": None, "duration": None, "uploader": None,
+           "estimated_mb": None, "acceptable": False, "reason": None, "warnings": []}
+    if ref.ignored_playlist:
+        out["warnings"].append("La URL incluía una lista o colección: se ignora y se procesa solo el video indicado")
+    opts = {"format": _format_selector(limits.max_height), "noplaylist": True, "quiet": True, "no_warnings": True,
+            "socket_timeout": 30, "retries": 2, "ignoreconfig": True, "usenetrc": False, "skip_download": True}
+    try:
+        with (ydl_factory or _default_factory)(opts) as ydl:
+            info = ydl.extract_info(ref.canonical_url, download=False)
+    except Exception as e:
+        out["reason"] = explain_download_error(str(e))
+        return out
+    out.update(title=info.get("title"), duration=info.get("duration"), uploader=info.get("uploader") or info.get("channel"))
+    try:
+        est = check_info(info, limits)
+        out["estimated_mb"] = round(est / 1e6) if est else None
+        out["acceptable"] = True
+    except InvalidInputError as e:
+        out["reason"] = str(e)
+    return out

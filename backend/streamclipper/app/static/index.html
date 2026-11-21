@@ -159,7 +159,7 @@ async function viewNew(view) {
   if (!CONFIG) CONFIG = await api("/api/config");
   const D = CONFIG.defaults;
   let kind = "url";
-  const url = el("input", { type: "text", placeholder: "https://www.youtube.com/watch?v=…", autocomplete: "off" });
+  const url = el("input", { type: "text", placeholder: "https://www.youtube.com/watch?v=…  ·  twitch.tv/videos/…  ·  kick.com/…/videos/…", autocomplete: "off" });
   const path = el("input", { type: "text", placeholder: "C:\\ruta\\al\\video.mp4" });
   const samples = el("select", {}), lang = el("select", {}), model = el("select", {}), layout = el("select", {}), platform = el("select", {});
   const clips = el("input", { type: "number", min: 1, max: 6, value: D.max_clips });
@@ -167,8 +167,29 @@ async function viewNew(view) {
   for (const m of CONFIG.models) model.append(el("option", { value: m.id, selected: m.id === D.model }, m.label + (m.cached ? "" : " — se descarga la primera vez")));
   layout.append(el("option", { value: "blur-fit" }, "Seguro: cuadro completo con fondo desenfocado"), el("option", { value: "focus" }, "Gameplay más grande (recorta los costados)"));
   for (const p of CONFIG.platforms) platform.append(el("option", { value: p }, p === "universal" ? "Universal (TikTok, Reels y Shorts)" : p));
-  const urlBox = el("div", {}, el("label", {}, "URL de YouTube"), url,
-    el("div", { class: "mut small" }, "Solo videos públicos (hasta " + CONFIG.youtube_limits.max_minutes + " min y " + CONFIG.youtube_limits.max_mb + " MB). Usá contenido propio o con autorización."));
+  const preview = el("div", {});
+  let previewSeq = 0, previewTimer = null;
+  async function checkUrl() {
+    const v = url.value.trim(), seq = ++previewSeq;
+    if (!v) { preview.replaceChildren(); return; }
+    preview.replaceChildren(el("div", { class: "mut small" }, "Consultando la plataforma…"));
+    try {
+      const r = await api("/api/inspect", { url: v });
+      if (seq !== previewSeq) return;   // llegó tarde: el usuario ya cambió la URL
+      const mins = r.duration ? (r.duration >= 3600 ? (r.duration / 3600).toFixed(1) + " h" : (r.duration / 60).toFixed(1) + " min") : "duración desconocida";
+      preview.replaceChildren(el("div", { class: "box" + (r.acceptable ? "" : " warn") },
+        el("strong", {}, r.title || "(sin título)"),
+        el("div", { class: "small mut" }, r.platform_label + " · " + r.kind_label + " · " + mins + (r.uploader ? " · " + r.uploader : "") + (r.estimated_mb ? " · ≈ " + r.estimated_mb + " MB" : "")),
+        r.acceptable ? el("div", { class: "small ok" }, "✓ Cumple los límites: se puede procesar.") : el("div", { class: "small err" }, "✗ " + (r.reason || "No se puede procesar este video.")),
+        ...(r.warnings || []).map((w) => el("div", { class: "small warn" }, "⚠ " + w))));
+    } catch (e) {
+      if (seq !== previewSeq) return;
+      preview.replaceChildren(el("div", { class: "box err" }, e.message));
+    }
+  }
+  url.addEventListener("input", () => { clearTimeout(previewTimer); previewSeq++; if (!url.value.trim()) { preview.replaceChildren(); return; } previewTimer = setTimeout(checkUrl, 700); });
+  const urlBox = el("div", {}, el("label", {}, "URL de YouTube, Twitch o Kick"), url, preview,
+    el("div", { class: "mut small" }, "Solo videos públicos: YouTube, VOD o clip de Twitch, VOD o clip de Kick (no directos, listas ni canales). Hasta " + CONFIG.url_limits.max_minutes + " min, " + CONFIG.url_limits.max_mb + " MB y " + CONFIG.url_limits.max_height + "p. Sin cuentas ni cookies. Usá contenido propio o con autorización."));
   const fileBox = el("div", { style: "display:none" }, el("label", {}, "Archivo de video (MP4, MKV, MOV o WEBM)"),
     el("div", { class: "row" }, path, el("button", { class: "fix", type: "button", onclick: async (ev) => {
       ev.target.disabled = true; ev.target.textContent = "Esperando el selector…";
@@ -180,7 +201,7 @@ async function viewNew(view) {
     for (const f of s.files) samples.append(el("option", { value: f.path }, f.name + " (" + f.mb + " MB)"));
   }).catch(() => {});
   samples.addEventListener("change", () => { if (samples.value) path.value = samples.value; });
-  const segBtns = [["url", "URL de YouTube"], ["file", "Archivo local"]].map(([k, label]) => el("button", { type: "button", class: k === "url" ? "on" : "", onclick: () => {
+  const segBtns = [["url", "URL (YouTube, Twitch, Kick)"], ["file", "Archivo local"]].map(([k, label]) => el("button", { type: "button", class: k === "url" ? "on" : "", onclick: () => {
     kind = k; urlBox.style.display = k === "url" ? "" : "none"; fileBox.style.display = k === "file" ? "" : "none";
     segBtns.forEach((b, i) => b.classList.toggle("on", ["url", "file"][i] === k));
   } }, label));

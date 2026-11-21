@@ -21,7 +21,7 @@ from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
 from streamclipper.core.errors import CancelledError, InvalidInputError, StreamClipperError
 from streamclipper.core.sysinfo import available_ram_gb
-from streamclipper.media.download import parse_youtube_url
+from streamclipper.media.download import parse_media_url
 from streamclipper.pipeline import resolve_input
 from streamclipper.webutil import ApiError
 
@@ -132,10 +132,11 @@ class JobManager:
             raise ApiError(400, "Pegá una URL de YouTube o elegí un archivo de video.")
         if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", source):
             try:
-                ref = parse_youtube_url(source)
+                ref = parse_media_url(source)
             except InvalidInputError as e:
                 raise ApiError(400, str(e)) from None
-            kind, src_key, title = "url", f"yt:{ref.video_id}", f"YouTube {ref.video_id}"
+            kind, title = "url", f"{ref.label} {ref.kind_label} {ref.video_id}"
+            src_key = f"yt:{ref.video_id}" if ref.platform == "youtube" else f"{ref.platform}:{ref.kind}:{ref.video_id}"
             source = ref.canonical_url
         else:
             try:

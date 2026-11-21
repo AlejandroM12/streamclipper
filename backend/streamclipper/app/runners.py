@@ -7,7 +7,7 @@ from streamclipper.app.state import AppJob
 from streamclipper.core.config import Settings
 from streamclipper.core.errors import CancelledError, InvalidInputError, StreamClipperError
 from streamclipper.edit import EditParams, render_edit
-from streamclipper.media.download import DownloadLimits, download_youtube
+from streamclipper.media.download import DownloadLimits, download_media
 from streamclipper.pipeline import run_pipeline
 
 
@@ -36,7 +36,7 @@ def run_process(settings: Settings):
             def on_dl(msg: str) -> None:
                 m = re.search(r"(\d+)%", msg)   # yt-dlp informa el avance real; si no hay porcentaje, no se inventa
                 ctl.stage("descarga", "running", int(m.group(1)) / 100 if m else None, msg)
-            res = download_youtube(source, cfg, DownloadLimits(), on_exists="reuse", cancel=ctl.cancel, progress=on_dl)
+            res = download_media(source, cfg, DownloadLimits(), on_exists="reuse", cancel=ctl.cancel, progress=on_dl)
             ctl.stage("descarga", "done", 1.0, "ya estaba descargado" if res.reused else "")
             ctl.set(title=res.title or job.title)
             for w in res.warnings:

@@ -27,7 +27,7 @@ from streamclipper.edit import (
     PRESETS, EditParams, auto_cues, export_versions, merge_edits, resolve_version_files, srt_from_ass, validate_window,
 )
 from streamclipper.jobs import load_result
-from streamclipper.media.download import DownloadLimits
+from streamclipper.media.download import DownloadLimits, inspect_media
 from streamclipper.models import Transcript
 from streamclipper.pipeline import settings_from_result
 from streamclipper.webutil import ApiError, host_ok, read_json_body, send_bytes, send_file, send_json
@@ -153,6 +153,11 @@ def make_handler(ctx: AppContext):
             if path == "/api/jobs":
                 job = ctx.manager.submit_process(body.get("source", ""), body.get("params") or {}, bool(body.get("force")))
                 return send_json(self, job.to_dict(), 201)
+            if path == "/api/inspect":
+                try:
+                    return send_json(self, inspect_media(str(body.get("url", "")), DownloadLimits()))
+                except InvalidInputError as e:
+                    raise ApiError(400, str(e)) from None
             if path == "/api/pick-file":
                 return send_json(self, {"path": ctx.picker()})
             if m := re.fullmatch(r"/api/jobs/([\w-]+)/(cancel|retry)", path):
@@ -180,7 +185,7 @@ def make_handler(ctx: AppContext):
                            for m in MODELS],
                 "languages": list(LANGUAGES), "layouts": list(LAYOUTS), "presets": list(PRESETS),
                 "platforms": ["universal", "tiktok", "reels", "shorts"],
-                "youtube_limits": {"max_minutes": dl.max_duration_s / 60, "max_mb": dl.max_bytes // (1024 * 1024),
+                "url_sources": ["YouTube", "Twitch", "Kick"], "url_limits": {"max_minutes": dl.max_duration_s / 60, "max_mb": dl.max_bytes // (1024 * 1024),
                                    "max_height": dl.max_height},
                 "data_dir": str(ctx.settings.data_dir),
             }

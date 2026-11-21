@@ -20,7 +20,7 @@ Opciones del `.bat`: `--no-open` (no abre el navegador), `--port 8781`.
 
 ## Uso
 
-1. **Nuevo**: pegá una URL de YouTube o elegí un MP4 (botón *Examinar…* o un video de `data\samples`). Los valores
+1. **Nuevo**: pegá una URL (YouTube, VOD o clip de Twitch, VOD o clip de Kick) o elegí un MP4 (botón *Examinar…* o un video de `data\samples`). Los valores
    recomendados ya están puestos: Whisper `small`, español, 3 clips, presentación segura (blur-fit).
 2. **Procesar**: aparece un trabajo con sus etapas. El porcentaje solo se muestra donde es real (descarga, transcripción y
    render); en el resto se ve el estado de la etapa. Se puede **cancelar** y **reintentar**. Solo corre un trabajo pesado a
@@ -38,7 +38,13 @@ Opciones del `.bat`: `--no-open` (no abre el navegador), `--port 8781`.
 ## Seguridad y límites
 
 - Escucha solo en loopback; se rechaza cualquier `Host` que no sea local y las escrituras exigen JSON.
-- YouTube: solo URL públicas de video (sin listas ni directos), hasta 20 min y 1500 MB. Usá contenido propio o autorizado.
+- URLs: la plataforma se detecta por el dominio exacto (YouTube, Twitch o Kick) y antes de procesar se muestra título,
+  duración y plataforma. Solo videos públicos de un único video, VOD o clip: se rechazan listas, colecciones, canales,
+  directos y dominios parecidos (`twitch.tv.evil.com`, etc.). Límites: 20 min, 1500 MB y 1080p. No se piden ni guardan
+  cuentas, contraseñas ni cookies: el contenido de suscriptores o que exige iniciar sesión se informa y se rechaza.
+  Usá contenido propio o con autorización.
+- **Los VOD de Twitch y Kick casi siempre duran horas** (en las pruebas, el más corto medía 64 min), así que con el límite
+  de 20 min se reconocen y se muestran pero se rechazan. Los clips (hasta ~60 s) no tienen ese problema.
 - La puntuación de los clips es un ranking heurístico: **nada se considera publicable sin revisión humana**.
 - Edición: mínimo 3 s y máximo 60 s por clip. No es un editor de video completo.
 

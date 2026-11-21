@@ -16,7 +16,7 @@ from streamclipper.review import ReviewStore, coverage_against_reviews, write_al
 from streamclipper.review_server import load_state, serve
 from streamclipper.session import resolve_review_target, run_session
 from streamclipper.jobs import resolve_job
-from streamclipper.media.download import DownloadLimits, download_youtube, looks_like_url
+from streamclipper.media.download import DownloadLimits, download_media, looks_like_url
 from streamclipper.media.ffmpeg import probe
 from streamclipper.pipeline import STAGES, resolve_input, run_pipeline
 
@@ -26,7 +26,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pr = sub.add_parser("process", help="Analiza un MP4 y genera hasta N clips verticales")
-    pr.add_argument("input", help="Ruta a un MP4 local, o URL HTTPS de YouTube (se descarga a data/samples/)")
+    pr.add_argument("input", help="Ruta a un MP4 local, o URL HTTPS de YouTube, Twitch (VOD o clip) o Kick (VOD o clip); se descarga a data/samples/")
     _add_download_args(pr)
     pr.add_argument("--model", default=None,
                     help="Modelo faster-whisper; acepta varios separados por coma (base,small) y los corre uno tras "
@@ -75,7 +75,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("doctor", help="Comprueba que FFmpeg, yt-dlp, Whisper y el resto de requisitos estén listos")
 
     se = sub.add_parser("session", help="Validación: procesa un video (URL o MP4) con varios modelos y prepara la revisión")
-    se.add_argument("input", help="URL HTTPS de YouTube o ruta a un MP4")
+    se.add_argument("input", help="URL HTTPS de YouTube, Twitch o Kick, o ruta a un MP4")
     se.add_argument("--models", default="base,small", help="Modelos Whisper separados por coma (defecto base,small)")
     se.add_argument("--label", default=None, help="Nombre de la sesión (defecto: nombre del archivo)")
     se.add_argument("--language", default=None, help="Idioma hablado (es, en); por defecto autodetecta")
@@ -126,7 +126,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pb = sub.add_parser("probe", help="Valida un video con FFprobe")
     pb.add_argument("input")
 
-    dl = sub.add_parser("download", help="Descarga un video público de YouTube a data/samples/ (uso autorizado)")
+    dl = sub.add_parser("download", help="Descarga un video público de YouTube, un VOD o clip de Twitch o Kick a data/samples/ (uso autorizado)")
     _add_download_args(dl, with_url=True)
     dl.add_argument("--overwrite", action="store_true", help="Reemplaza el archivo si ya existe")
     dl.add_argument("--dry-run", action="store_true",
@@ -196,7 +196,7 @@ def _lexicon_overrides(args) -> dict:
 
 def _add_download_args(p: argparse.ArgumentParser, with_url: bool = False) -> None:
     if with_url:
-        p.add_argument("url", help="URL HTTPS de YouTube o YouTube Shorts (un único video)")
+        p.add_argument("url", help="URL HTTPS de YouTube/Shorts, VOD o clip de Twitch o Kick (un único video)")
     p.add_argument("--max-minutes", type=float, default=20.0, help="Duración máxima permitida (min)")
     p.add_argument("--max-size-mb", type=int, default=1500, help="Tamaño máximo permitido (MB)")
     p.add_argument("--max-height", type=int, default=1080, help="Resolución máxima a descargar (alto en px)")
@@ -267,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "download":
             cancel = CancelToken()
             try:
-                res = download_youtube(
+                res = download_media(
                     args.url, Settings(), _limits(args), dry_run=args.dry_run, cancel=cancel,
                     on_exists="overwrite" if args.overwrite else "error",
                     progress=lambda m: print(f"  {m}", file=sys.stderr))
@@ -428,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if looks_like_url(args.input):  # URL: se descarga (o se reutiliza lo ya descargado) y se procesa el MP4
             try:
-                res = download_youtube(args.input, Settings(), _limits(args), on_exists="reuse", cancel=cancel,
+                res = download_media(args.input, Settings(), _limits(args), on_exists="reuse", cancel=cancel,
                                        progress=lambda m: print(f"  {m}", file=sys.stderr))
             except KeyboardInterrupt:
                 cancel.cancel()
