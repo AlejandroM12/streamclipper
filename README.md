@@ -31,6 +31,23 @@ cd backend
 .\.venv\Scripts\python.exe -m streamclipper export  <job> --ids 5 7
 ```
 
+### Descargar desde YouTube (solo contenido propio o autorizado)
+
+```powershell
+.\.venv\Scripts\python.exe -m streamclipper download "https://www.youtube.com/watch?v=<id>" --dry-run   # solo valida
+.\.venv\Scripts\python.exe -m streamclipper download "https://www.youtube.com/watch?v=<id>"             # descarga
+.\.venv\Scripts\python.exe -m streamclipper process  "https://www.youtube.com/watch?v=<id>" --model base,small
+```
+
+- Acepta solo URLs **HTTPS** de `youtube.com`, `m.youtube.com`, `youtu.be` y `/shorts/` de **un único video**. Se rechazan
+  listas (`/playlist`; en `watch?v=..&list=..` se ignora la lista), canales, búsquedas, directos, credenciales y otros dominios.
+- Antes de descargar consulta duración, disponibilidad y tamaño estimado. Límites por defecto: **20 min**, **1500 MB**,
+  **1080p** (`--max-minutes`, `--max-size-mb`, `--max-height`). `--dry-run` muestra título, duración, tamaño estimado y licencia.
+- Se guarda como `data/samples/youtube-<id>.mp4` (ignorado por git) con un `youtube-<id>.source.json` de procedencia.
+  El MP4 se valida con FFprobe. **No sobrescribe**: si existe, falla salvo `--overwrite` (`process <URL>` lo reutiliza).
+- No usa cookies ni evade restricciones: videos privados, eliminados, con restricción de edad/región, solo para miembros,
+  con DRM o directos se rechazan con un mensaje claro.
+
 Opciones de `process`: `--model`, `--label`, `--language es|en`, `--max-clips`, `--min-clip/--max-clip`, `--pre/--post`
 (contexto en s), `--layout blur-fit|fill|crop` (+ `--crop-x/--crop-y/--zoom`), `--min-score`, `--peak-db`,
 `--text-trigger`, `--threads`, `--keep-temp`, `--json`.

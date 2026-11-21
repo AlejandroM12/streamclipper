@@ -11,6 +11,18 @@ umbrales hasta tener varios videos** (ver "Calibración").
   con `base`/`small` en el video sintético, pero no se midió aún con video real largo.
 - **Espacio:** el pipeline exige 5 GB libres (`min_free_gb`).
 
+## 1b. Obtener el video
+
+Si es tuyo o tenés autorización para usarlo, podés dejar que StreamClipper lo descargue (YouTube, un solo video,
+máx. 20 min). Primero validá sin descargar:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamclipper download "<URL del video autorizado>" --dry-run
+```
+
+Luego `process "<URL>"` (paso 2) lo descarga a `data\samples\` y lo procesa; o descargalo aparte con `download`.
+Si ya tenés el MP4, usá su ruta.
+
 ## 2. Ejecutar y comparar `base` vs `small`
 
 ```powershell
@@ -20,6 +32,12 @@ cd C:\Users\axel_\Projects\StreamClipper\backend
 
 Corre `base` y luego `small` (uno por vez, cada uno en su carpeta `data\jobs\<fecha>-<modelo>-partida1-xxxx\`) y
 genera la comparación en `data\comparisons\`. La primera vez con `small` descarga ~480 MB.
+
+Con URL en vez de ruta (descarga una vez y reutiliza el archivo en las siguientes corridas):
+
+```powershell
+.\.venv\Scripts\python.exe -m streamclipper process "<URL del video autorizado>" --model base,small --language es --label partida1
+```
 
 Por separado, si preferís:
 
