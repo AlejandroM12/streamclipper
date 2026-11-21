@@ -241,6 +241,67 @@ def test_old_format_job_without_whisper_stats_still_rescores(result, tmp_path):
     assert "Evidencia de Whisper:** no disponible" in (Path(res["job_dir"]) / "report.md").read_text(encoding="utf-8")
 
 
+def _digest(folder: Path) -> dict:
+    import hashlib
+    return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(folder.iterdir()) if p.is_file()}
+
+
+def test_rerender_creates_new_versions_and_never_touches_the_originals(result):
+    from streamclipper.core.errors import InvalidInputError
+    from streamclipper.rerender import rerender_job
+    from streamclipper.review import build_items
+
+    job = Path(result["job_dir"])
+    before = _digest(job / "out")
+    result_json = (job / "result.json").read_bytes()
+    m = rerender_job(str(job), Settings(), tag="t3", layout="focus", fg_x=0.1)
+
+    assert _digest(job / "out") == before and (job / "result.json").read_bytes() == result_json   # intactos
+    out = job / "out_t3"
+    assert sorted(p.name for p in out.iterdir()) == sorted(
+        f"clip_0{i}.{ext}" for i in (1, 2) for ext in ("ass", "mp4", "srt"))
+    assert not list(out.glob("*.part")) and not list(job.glob("work_rerender_*"))
+    assert m["settings"]["layout"] == "focus" and m["settings"]["fg_x"] == 0.1 and len(m["clips"]) == 2
+    for r in m["clips"]:
+        n, o = r["new"], r["original"]
+        assert n["validation"]["ok"] and n["boundaries"]["errors"] == []
+        info = n["validation"]["info"]
+        assert (info["video"]["width"], info["video"]["height"]) == (1080, 1920) and info["audio"]["codec_name"] == "aac"
+        assert 15 <= n["duration"] <= 60 and n["render_seconds"] > 0
+        for k in ("cues", "coverage_pct", "cps_mean", "pct_over_max_cps", "min_cue_duration_s", "comfortable_pct"):
+            assert k in n["metrics"] and k in o["metrics"]
+        assert n["metrics"]["cues"] > 0 and isinstance(n["issue_count"], int)
+        assert Path(n["srt"]).read_text(encoding="utf-8").startswith("1\n")
+    assert m["resources"]["python_peak_mb"] > 0 and m["resources"]["ffmpeg_peak_mb"] > 0
+    md = (job / "rerender_t3.md").read_text(encoding="utf-8")
+    assert "Original" in md and "Nueva" in md and "no** significan un clip mejor" in md and "Ritmo del habla" in md
+
+    with pytest.raises(InvalidInputError, match="Ya existe"):
+        rerender_job(str(job), Settings(), tag="t3")
+    with pytest.raises(InvalidInputError, match="etiqueta"):
+        rerender_job(str(job), Settings(), tag="Mala Etiqueta!")
+    rerender_job(str(job), Settings(), tag="t3", overwrite=True)
+    assert _digest(job / "out") == before                      # ni siquiera con --overwrite se tocan los originales
+
+    items = build_items(job, Settings(), 0, with_sync=False)    # la herramienta de revisión ve original y nueva juntas
+    names = [i["name"] for i in items if i["kind"] == "clip"]
+    assert names == ["clip_01", "clip_01@t3", "clip_02", "clip_02@t3"]
+    v = next(i for i in items if i["name"] == "clip_01@t3")
+    assert v["variant"] == "t3" and v["media"] == "out_t3/clip_01.mp4" and v["media_exists"]
+
+
+def test_pipeline_adjusts_bounds_after_selection_without_changing_the_ranking(sample, result, tmp_path):
+    for c in result["clips"]:
+        assert c["layout"] == "blur-fit" and c["selected_window"][0] <= c["selected_window"][1]
+        assert c["subtitle_metrics"]["cues"] > 0 and Path(c["file"]).with_suffix(".srt").is_file()
+    off = run_pipeline(str(sample), Settings(data_dir=tmp_path, language="en", refine_bounds=False))
+    assert off["status"] == "completed"
+    # mismo ranking, puntuaciones y ventanas candidatas con y sin ajuste de límites
+    key = lambda r: [(c["rank"], c["start"], c["end"], c["score"]) for c in r["candidates"]]  # noqa: E731
+    assert key(off) == key(result) and off["selected"] == result["selected"]
+    assert all(c["refine_notes"] == [] and c["start"] == c["selected_window"][0] for c in off["clips"])
+
+
 def test_validation_session_end_to_end(sample, tmp_path):
     """Sesión completa: job + alternativos + informe por clip + elementos de revisión con sincronía estimada."""
     from streamclipper.review import ReviewStore, coverage_against_reviews
