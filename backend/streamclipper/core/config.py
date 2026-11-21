@@ -39,6 +39,10 @@ class Settings:
     # análisis
     audio_peak_db: float = 6.0  # dB sobre el nivel habitual para considerar un pico de audio
     text_trigger: float = 0.5
+    # léxico y confianza (ver docs/lexicon.md)
+    lexicon_path: str | None = None   # JSON que amplía/reemplaza reglas del léxico por defecto
+    min_word_prob: float = 0.4        # una palabra de reacción con menor confianza de Whisper no cuenta
+    repeat_min_prob: float = 0.6      # una repetición solo cuenta si su confianza media es al menos esta
     # render
     layout: str = "blur-fit"  # blur-fit | fill | crop
     crop_x: float = 0.5
@@ -73,3 +77,7 @@ class Settings:
             raise InvalidInputError("crop_x/crop_y en [0,1] y zoom en [1,4]")
         if self.pre_context < 0 or self.post_context < 0:
             raise InvalidInputError("El contexto no puede ser negativo")
+        if not (0 <= self.min_word_prob <= 1 and 0 <= self.repeat_min_prob <= 1):
+            raise InvalidInputError("min_word_prob y repeat_min_prob deben estar en [0, 1]")
+        if self.lexicon_path and not Path(self.lexicon_path).is_file():
+            raise InvalidInputError(f"No existe el archivo de léxico: {self.lexicon_path}")
