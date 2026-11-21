@@ -9,6 +9,7 @@ from streamclipper.core.config import Settings
 from streamclipper.core.errors import StreamClipperError
 from streamclipper.export import export_alternatives
 from streamclipper.jobs import resolve_job
+from streamclipper.media.download import DownloadLimits, download_youtube, looks_like_url
 from streamclipper.media.ffmpeg import probe
 from streamclipper.pipeline import STAGES, resolve_input, run_pipeline
 
@@ -18,7 +19,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pr = sub.add_parser("process", help="Analiza un MP4 y genera hasta N clips verticales")
-    pr.add_argument("input", help="Ruta a un MP4 local")
+    pr.add_argument("input", help="Ruta a un MP4 local, o URL HTTPS de YouTube (se descarga a data/samples/)")
+    _add_download_args(pr)
     pr.add_argument("--model", default="base",
                     help="Modelo faster-whisper; acepta varios separados por coma (base,small) y los corre "
                          "uno tras otro, cada uno en su propio job")
@@ -59,7 +61,26 @@ def _build_parser() -> argparse.ArgumentParser:
 
     pb = sub.add_parser("probe", help="Valida un video con FFprobe")
     pb.add_argument("input")
+
+    dl = sub.add_parser("download", help="Descarga un video público de YouTube a data/samples/ (uso autorizado)")
+    _add_download_args(dl, with_url=True)
+    dl.add_argument("--overwrite", action="store_true", help="Reemplaza el archivo si ya existe")
+    dl.add_argument("--dry-run", action="store_true",
+                    help="Solo valida la URL y consulta duración/tamaño/licencia; no descarga")
     return p
+
+
+def _add_download_args(p: argparse.ArgumentParser, with_url: bool = False) -> None:
+    if with_url:
+        p.add_argument("url", help="URL HTTPS de YouTube o YouTube Shorts (un único video)")
+    p.add_argument("--max-minutes", type=float, default=20.0, help="Duración máxima permitida (min)")
+    p.add_argument("--max-size-mb", type=int, default=1500, help="Tamaño máximo permitido (MB)")
+    p.add_argument("--max-height", type=int, default=1080, help="Resolución máxima a descargar (alto en px)")
+
+
+def _limits(args) -> DownloadLimits:
+    return DownloadLimits(max_duration_s=args.max_minutes * 60, max_bytes=args.max_size_mb * 1024 * 1024,
+                          max_height=args.max_height)
 
 
 def _print_result(result: dict) -> None:
@@ -78,6 +99,24 @@ def _print_result(result: dict) -> None:
     print(f"Reporte: {result['job_dir']}\\report.md")
 
 
+def _print_download(res) -> None:
+    if res.dry_run:
+        print(f"Validación OK (no se descargó nada): '{res.title}' — {res.duration / 60:.1f} min, "
+              f"tamaño estimado {_mb(res.estimated_bytes)}, licencia: {res.license or 'no informada'}")
+        print(f"Se guardaría en {res.path}")
+    elif res.reused:
+        print(f"Ya estaba descargado, se reutiliza: {res.path}")
+    else:
+        print(f"Descargado y verificado con FFprobe: {res.path}\n  '{res.title}' — {res.duration / 60:.1f} min, "
+              f"{_mb(res.size_bytes)}, licencia: {res.license or 'no informada'}")
+    for w in res.warnings:
+        print(f"  Aviso: {w}")
+
+
+def _mb(n: int | None) -> str:
+    return "desconocido" if n is None else f"{n / 1e6:.0f} MB"
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):  # consolas cp1252 no pueden imprimir «⚠️», «—», etc.
         if hasattr(stream, "reconfigure"):
@@ -86,6 +125,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "probe":
             print(json.dumps(vars(probe(resolve_input(args.input), Settings().ffprobe)), indent=2))
+            return 0
+
+        if args.cmd == "download":
+            cancel = CancelToken()
+            print("Recordatorio: descargá solo contenido propio o que tengas autorización para usar.", file=sys.stderr)
+            try:
+                res = download_youtube(
+                    args.url, Settings(), _limits(args), dry_run=args.dry_run, cancel=cancel,
+                    on_exists="overwrite" if args.overwrite else "error",
+                    progress=lambda m: print(f"  {m}", file=sys.stderr))
+            except KeyboardInterrupt:
+                cancel.cancel()
+                print("Cancelado.", file=sys.stderr)
+                return 130
+            _print_download(res)
             return 0
 
         if args.cmd == "compare":
@@ -121,6 +175,18 @@ def main(argv: list[str] | None = None) -> int:
             if not out["clips"]:
                 print("No había alternativos para exportar.")
             return 0
+
+        if looks_like_url(args.input):  # URL: se descarga (o se reutiliza lo ya descargado) y se procesa el MP4
+            print("Recordatorio: procesá solo contenido propio o que tengas autorización para usar.", file=sys.stderr)
+            try:
+                res = download_youtube(args.input, Settings(), _limits(args), on_exists="reuse", cancel=cancel,
+                                       progress=lambda m: print(f"  {m}", file=sys.stderr))
+            except KeyboardInterrupt:
+                cancel.cancel()
+                print("Cancelado.", file=sys.stderr)
+                return 130
+            _print_download(res)
+            args.input = str(res.path)
 
         models = [m.strip() for m in args.model.split(",") if m.strip()]
         job_ids, exit_code = [], 0
