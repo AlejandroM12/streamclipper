@@ -161,6 +161,86 @@ def test_two_runs_keep_separate_results_and_compare(sample, result, tmp_path_fac
     assert "2/2" in text  # mismos dos momentos
 
 
+def test_whisper_evidence_is_persisted_and_summarized(result):
+    job = Path(result["job_dir"])
+    t = json.loads((job / "transcript.json").read_text(encoding="utf-8"))
+    assert t["evidence_version"] == 2 and t["whisper_segments"]
+    for raw in t["whisper_segments"]:
+        assert isinstance(raw["avg_logprob"], float) and isinstance(raw["no_speech_prob"], float)
+        assert isinstance(raw["compression_ratio"], float)
+    s0 = t["segments"][0]
+    assert s0["avg_logprob"] is not None and s0["compression_ratio"] is not None and s0["words"][0]["prob"] > 0
+    ev = result["transcript"]["evidence"]
+    assert ev["whisper_stats_available"] and ev["sentences"] == len(t["segments"])
+    rep = json.loads((job / "report.json").read_text(encoding="utf-8"))
+    assert rep["transcript"]["evidence"]["whisper_stats_available"] is True
+    assert rep["selection"] is not None and "margin_to_next" in rep["selection"]
+    assert "Evidencia de Whisper" in (job / "report.md").read_text(encoding="utf-8")
+
+
+def test_candidates_carry_windows_and_evidence(result):
+    for c in result["candidates"]:
+        for comp in c["components"]:
+            assert comp["window"] is not None
+        r = next(x for x in c["components"] if x["name"] == "reaccion_verbal")
+        assert (r["value"] > 0) == any(e.startswith("+") for e in r["evidence"])
+
+
+def test_rescore_reuses_transcript_without_retranscribing_and_evaluates(result, monkeypatch):
+    import streamclipper.transcription.whisper as w
+    from streamclipper.evaluation import evaluate_jobs
+    from streamclipper.export import export_alternatives
+    from streamclipper.rescore import rescore_job
+
+    monkeypatch.setattr(w, "transcribe", lambda *a, **k: (_ for _ in ()).throw(AssertionError("retranscribió")))
+    res = rescore_job(result["job_dir"], Settings(), suffix="v2")
+    new_dir = Path(res["job_dir"])
+    assert res["rescored_from"] == result["job_id"] and res["status"] == "completed" and res["clips"] == []
+    assert new_dir != Path(result["job_dir"]) and (new_dir / "report.md").is_file()
+    assert (new_dir / "transcript.json").read_bytes() == (Path(result["job_dir"]) / "transcript.json").read_bytes()
+    assert not (new_dir / "work").exists()
+    # mismo algoritmo y mismos datos: los dos momentos reales se mantienen
+    sel = [c for c in res["candidates"] if c["rank"] in res["selected"]]
+    assert len(sel) == 2 and all(any(c["start"] < e < c["end"] for c in sel) for e in (30.0, 73.0))
+
+    data, md = evaluate_jobs(result["job_dir"], res["job_dir"], Settings())
+    assert data["counts"]["matched"] >= 2 and "Top-3: antes → ahora" in md
+    assert all(t["still"] is not None for t in data["top3_old"])  # ningún clip real se perdió
+
+    # los clips elegidos de un job re-puntuado (sin renderizar) se exportan sin retranscribir
+    out = export_alternatives(res["job_dir"], Settings(), selected=True)
+    assert [Path(c["file"]).name for c in out["clips"]] == ["clip_01.mp4", "clip_02.mp4"]
+    assert all(c["validation"]["ok"] and c["boundaries"]["errors"] == [] for c in out["clips"])
+    rep = json.loads((new_dir / "report.json").read_text(encoding="utf-8"))
+    assert rep["clips_generated"] == 2
+    from streamclipper.core.errors import InvalidInputError
+    with pytest.raises(InvalidInputError, match="ya tiene sus clips"):
+        export_alternatives(res["job_dir"], Settings(), selected=True)
+    again = export_alternatives(res["job_dir"], Settings(), ranks=[res["selected"][0]])
+    assert again["clips"] == [] and any("ya estaba exportado" in w for w in again["warnings"])
+
+
+def test_old_format_job_without_whisper_stats_still_rescores(result, tmp_path):
+    import shutil
+    from streamclipper.rescore import rescore_job
+
+    old = tmp_path / "old-format-job"
+    shutil.copytree(result["job_dir"], old, ignore=shutil.ignore_patterns("out", "work*"))
+    (old / "out").mkdir()
+    t = json.loads((old / "transcript.json").read_text(encoding="utf-8"))
+    for k in ("whisper_segments", "evidence_version"):
+        t.pop(k)
+    for s in t["segments"]:
+        for k in ("avg_logprob", "compression_ratio"):
+            s.pop(k)
+        s["no_speech_prob"] = 0.0   # el valor por omisión del formato viejo: nunca lo midió Whisper
+    (old / "transcript.json").write_text(json.dumps(t), encoding="utf-8")
+    res = rescore_job(str(old), Settings(), suffix="compat")
+    assert res["status"] == "completed" and len(res["selected"]) == 2
+    assert res["transcript"]["evidence"]["whisper_stats_available"] is False
+    assert "Evidencia de Whisper:** no disponible" in (Path(res["job_dir"]) / "report.md").read_text(encoding="utf-8")
+
+
 def test_cancelled_job_leaves_no_temp_files_or_partial_outputs(sample, tmp_path):
     token = CancelToken()
     token.cancel()
