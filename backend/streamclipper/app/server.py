@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -35,6 +36,9 @@ from streamclipper.webutil import ApiError, host_ok, read_json_body, send_bytes,
 log = logging.getLogger("streamclipper.app")
 VIDEO_EXT = (".mp4", ".mkv", ".mov", ".webm")
 _STATIC = Path(__file__).parent / "static" / "index.html"
+# Versión del contrato entre la página y la API (/api/config, /api/inspect…). Súbela al cambiar el formato de lo que la página lee.
+# La página y la API salen del MISMO proceso, y la página verifica que coincidan (ver loadConfig en index.html).
+API_CONTRACT = 4
 
 
 def pick_file_dialog() -> str:
@@ -58,6 +62,8 @@ class AppContext:
         self.settings, self.manager, self.picker, self.opener = settings, manager, picker, opener
         self._doctor: tuple[float, dict] | None = None
         self._lock = threading.Lock()
+        # La página se carga UNA vez, al arrancar: así un proceso nunca sirve una página más nueva (o más vieja) que su propia API.
+        self.page = _STATIC.read_text(encoding="utf-8").replace("__API_CONTRACT__", str(API_CONTRACT)).encode("utf-8")
 
     def doctor(self) -> dict:
         with self._lock:
@@ -114,12 +120,12 @@ def make_handler(ctx: AppContext):
             s = ctx.settings
             if method == "GET":
                 if path == "/":
-                    return send_bytes(self, _STATIC.read_bytes(), "text/html; charset=utf-8")
+                    return send_bytes(self, ctx.page, "text/html; charset=utf-8")
                 if path == "/favicon.ico":
                     self.send_response(204)
                     return self.end_headers()
                 if path == "/api/health":
-                    return send_json(self, {"ok": True, "version": __version__})
+                    return send_json(self, {"ok": True, "version": __version__, "contract": API_CONTRACT})
                 if path == "/api/doctor":
                     return send_json(self, ctx.doctor())
                 if path == "/api/config":
@@ -190,7 +196,7 @@ def make_handler(ctx: AppContext):
         def _config(self) -> dict:
             dl = DownloadLimits()
             return {
-                "version": __version__, "defaults": {"model": "small", "language": "es", "layout": "blur-fit", "max_clips": 3, "detector": "classic",
+                "version": __version__, "contract": API_CONTRACT, "defaults": {"model": "small", "language": "es", "layout": "blur-fit", "max_clips": 3, "detector": "classic",
                                                      "platform": "universal"},
                 "models": [{"id": m, "cached": model_cached(m), "label": {"small": "small (recomendado)", "base": "base (más rápido)"}[m]}
                            for m in MODELS],
@@ -299,8 +305,20 @@ def list_sessions_title(settings: Settings, name: str) -> str:
     return next((s["title"] for s in list_sessions(settings, include_derived=True) if s["id"] == name), name)
 
 
+class AppServer(ThreadingHTTPServer):
+    """En Windows, SO_REUSEADDR permite que DOS procesos escuchen en el mismo puerto y el más viejo sigue recibiendo las
+    conexiones: una instancia nueva quedaba «abierta» sin atender nada y se veía la versión anterior de la API. Aquí el puerto
+    es exclusivo; si está ocupado se prueba el siguiente."""
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        if sys.platform == "win32":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def make_server(ctx: AppContext, host: str = "127.0.0.1", port: int = 8780) -> ThreadingHTTPServer:
-    srv = ThreadingHTTPServer((host, port), make_handler(ctx))
+    srv = AppServer((host, port), make_handler(ctx))
     srv.daemon_threads = True
     return srv
 
@@ -318,6 +336,9 @@ def serve_app(settings: Settings, port: int = 8780, open_browser: bool = True, h
     if server is None:
         raise InvalidInputError(f"No hay puertos libres entre {port} y {port + 19}")
     url = f"http://127.0.0.1:{server.server_port}/"
+    if server.server_port != port:
+        print(f"AVISO: el puerto {port} está ocupado (¿hay otra ventana de StreamClipper abierta, quizá de una versión anterior?). "
+              f"Se usa el {server.server_port}. Cerrá la otra instancia para evitar confusiones.", flush=True)
     print(f"StreamClipper está listo en {url}\nDatos: {settings.data_dir}\nCerrá esta ventana o presioná Ctrl+C para salir.", flush=True)
     if host != "127.0.0.1":
         print("AVISO: la aplicación no tiene autenticación; escuchar fuera de 127.0.0.1 expone tus archivos.", flush=True)

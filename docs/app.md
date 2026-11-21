@@ -1,4 +1,4 @@
-# Aplicación local (MVP 1.0)
+﻿# Aplicación local (MVP 1.0)
 
 Interfaz web que corre **solo en tu equipo** (`127.0.0.1`), sin cuentas ni base de datos. Usa el mismo pipeline, la misma
 revisión y los mismos presets que la línea de comandos; no hay nada simulado.
@@ -90,3 +90,8 @@ video con el otro detector para poder compararlos y valorar ambos.
 
 `streamclipper doctor` (o la pestaña *Estado del sistema*) indica qué falta. Con poca RAM libre, cerrá el navegador/IDE o
 usá el modelo `base`.
+
+Si al abrir la aplicación aparece *«Esta ventana y el servidor de StreamClipper son de versiones distintas»*, hay una ventana negra anterior
+abierta: cerrá todas y volvé a abrir iniciar_streamclipper.bat. Si el puerto 8780 está ocupado, la ventana nueva lo avisa y usa el
+siguiente (el navegador se abre en la dirección correcta).
+
