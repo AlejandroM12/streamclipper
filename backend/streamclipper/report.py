@@ -33,6 +33,8 @@ def build_summary(result: dict) -> dict:
             "transcription_realtime_factor": round(t_trans / duration, 3) if t_trans and duration else None,
         },
         "resources": result.get("resources"),
+        "selection": result.get("selection"),
+        "rescored_from": result.get("rescored_from"),
         "candidates_detected": len(result.get("candidates", [])),
         "candidates": [
             {"rank": c["rank"], "start": c["start"], "end": c["end"], "score": c["score"],
@@ -79,8 +81,24 @@ def render_markdown(s: dict) -> str:
          f"pico FFmpeg {_fmt(r.get('ffmpeg_peak_mb'), ' MB')}, "
          f"pico combinado {_fmt(r.get('total_peak_mb_approx'), ' MB')}, "
          f"mínimo libre del sistema {_fmt(r.get('system_min_available_gb'), ' GB')}",
-         f"- **Candidatos detectados:** {s['candidates_detected']} — **clips generados:** {s['clips_generated']}",
-         "", "## Clips generados", ""]
+         f"- **Candidatos detectados:** {s['candidates_detected']} — **clips generados:** {s['clips_generated']}"]
+    if s.get("rescored_from"):
+        L.append(f"- **Re-puntuado desde:** `{s['rescored_from']}` (sin retranscribir; clips sin renderizar)")
+    ev = (s.get("transcript") or {}).get("evidence")
+    if ev is not None:
+        if ev.get("whisper_stats_available"):
+            L.append(f"- **Evidencia de Whisper:** {ev['sentences_low_confidence']} oraciones de baja confianza, "
+                     f"{ev['sentences_repetitive']} repetitivas, {ev['sentences_possible_no_voice']} posible no-voz "
+                     f"(de {ev['sentences']}); palabras con prob < 0.4: {ev['words_below_0_4_pct']} %")
+        else:
+            L.append(f"- **Evidencia de Whisper:** no disponible (job anterior); palabras con prob < 0.4: "
+                     f"{ev['words_below_0_4_pct']} %")
+    sel = s.get("selection")
+    if sel and sel.get("margin_to_next") is not None:
+        L.append(f"- **Estabilidad de la selección:** margen al siguiente candidato elegible {sel['margin_to_next']} "
+                 f"(#{sel['next_rank']}), dispersión entre elegidos {sel['top_spread']}"
+                 + (" — ⚠️ frágil" if sel["fragile"] else ""))
+    L += ["", "## Clips generados", ""]
     for c in s["clips"] + s["alternative_clips"]:
         ok = "OK" if c["validation_ok"] else "FALLÓ"
         L.append(f"- `{c['name']}` (candidato #{c['rank']}): {c['start']}s → {c['end']}s "

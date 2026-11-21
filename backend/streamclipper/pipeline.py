@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from streamclipper.analysis.audio import analyze_audio
+from streamclipper.analysis.confidence import summarize as summarize_confidence
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
 from streamclipper.core.errors import CancelledError, InvalidInputError, MediaError, StreamClipperError
@@ -19,7 +20,7 @@ from streamclipper.media.ffmpeg import extract_audio, probe
 from streamclipper.render.clips import render_set
 from streamclipper.report import write_reports
 from streamclipper.selection.base import AnalysisContext, CandidateScorer
-from streamclipper.selection.selector import find_clips
+from streamclipper.selection.selector import find_clips, selection_report
 from streamclipper.transcription.sentences import split_sentences
 from streamclipper.transcription.whisper import transcribe
 
@@ -158,7 +159,7 @@ def run_pipeline(
                     json.dumps(transcript.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
                 n_words = sum(len(s.words) for s in transcript.segments)
                 result["transcript"] = {"language": transcript.language, "sentences": len(transcript.segments),
-                                        "words": n_words}
+                                        "words": n_words, "evidence": summarize_confidence(transcript)}
                 if n_words == 0:
                     warn("No se transcribió ninguna palabra: la selección depende solo del audio")
 
@@ -172,6 +173,9 @@ def run_pipeline(
                     c.rank = rank
                 result["candidates"] = [c.to_dict() for c in candidates]
                 result["selected"] = [c.rank for c in chosen]
+                result["selection"] = selection_report(candidates, chosen, ctx)
+                if result["selection"]["fragile"]:
+                    warn(result["selection"]["message"])
                 if not chosen:
                     result["note"] = "No se encontraron momentos que superen el umbral; no se generaron clips."
                     warn(result["note"])

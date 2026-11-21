@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from streamclipper.analysis.audio import AudioCurve
+from streamclipper.analysis.lexicon import Lexicon, load_lexicon
 from streamclipper.analysis.text import TextSignal, analyze_segment
 from streamclipper.core.config import Settings
 from streamclipper.models import Candidate, Transcript
@@ -14,10 +15,15 @@ class AnalysisContext:
     duration: float
     settings: Settings
     signals: list[TextSignal] = field(default_factory=list)
+    lexicon: Lexicon | None = None
 
     def __post_init__(self) -> None:
+        if self.lexicon is None:
+            self.lexicon = load_lexicon(self.settings.lexicon_path)
         if not self.signals:
-            self.signals = [analyze_segment(s) for s in self.transcript.segments]
+            # la curva de audio permite evaluar énfasis acústico de palabras ambiguas («vamos»)
+            self.signals = [analyze_segment(s, self.curve, self.settings, self.lexicon)
+                            for s in self.transcript.segments]
 
 
 class CandidateScorer(Protocol):
