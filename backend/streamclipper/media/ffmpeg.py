@@ -6,6 +6,7 @@ from pathlib import Path
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.errors import InvalidInputError, MediaError
 from streamclipper.core.log import log_event
+from streamclipper.core.memory import register_child, unregister_child
 from streamclipper.models import MediaInfo
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -25,6 +26,7 @@ def run_cancellable(
         text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW,
     )
     started = time.monotonic()
+    register_child(proc.pid)
     try:
         while True:
             try:
@@ -36,6 +38,7 @@ def run_cancellable(
                 if timeout and time.monotonic() - started > timeout:
                     raise MediaError(f"Tiempo de espera agotado ({timeout:.0f}s) ejecutando {Path(cmd[0]).name}")
     finally:
+        unregister_child(proc.pid)
         if proc.poll() is None:
             proc.kill()
             proc.communicate()
