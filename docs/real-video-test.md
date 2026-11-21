@@ -80,8 +80,17 @@ defecto no se cambiaron):
 
 | Opción | Defecto | Efecto |
 |---|---|---|
-| `--peak-db` | 6.0 | dB sobre el nivel habitual para tratar un pico de audio como ancla |
+| `--peak-db` | 6.0 | dB sobre el nivel habitual para tratar un pico de audio como ancla (también cuenta como «volumen» para «vamos») |
 | `--text-trigger` | 0.5 | reacción verbal mínima para considerar una frase |
+| `--min-word-prob` | 0.4 | confianza mínima de Whisper para que una palabra de reacción cuente |
+| `--repeat-min-prob` | 0.6 | confianza media mínima para que una repetición cuente en `frases` |
+| `--lexicon` | — | JSON con palabras/reglas propias (ver [lexicon.md](lexicon.md)) |
+
+Para probar un cambio de léxico o de parámetros **sin retranscribir**: `rescore <job> --suffix v2 --lexicon mi.json
+--evaluate` (muestra qué candidatos cambian y por qué) y luego `export <job>-v2 --selected` para ver los clips.
+
+**Selección frágil:** si el reporte avisa que el siguiente candidato quedó a menos de 0.05 del último elegido, el corte
+entre «elegido» y «no elegido» es casi arbitrario: revisá también `export --alternatives 3`.
 | `--min-score` | 0.35 | puntuación mínima para generar un clip |
 | `--pre` / `--post` | 6 / 6 | contexto en segundos antes/después del momento |
 | `--min-clip` / `--max-clip` | 15 / 60 | duración permitida |

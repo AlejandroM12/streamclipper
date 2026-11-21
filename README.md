@@ -26,9 +26,12 @@ cd backend
 .\.venv\Scripts\python.exe -m streamclipper probe   ruta\video.mp4
 .\.venv\Scripts\python.exe -m streamclipper process ruta\video.mp4                       # base por defecto
 .\.venv\Scripts\python.exe -m streamclipper process ruta\video.mp4 --model base,small    # ambos + comparación
-.\.venv\Scripts\python.exe -m streamclipper compare <jobA> <jobB>
+.\.venv\Scripts\python.exe -m streamclipper compare <jobA> <jobB>      # candidatos, correlación, top-3 cruzado, clips
 .\.venv\Scripts\python.exe -m streamclipper export  <job> --alternatives 3               # sin retranscribir
 .\.venv\Scripts\python.exe -m streamclipper export  <job> --ids 5 7
+.\.venv\Scripts\python.exe -m streamclipper rescore <job> --suffix v2 --evaluate         # algoritmo actual, sin retranscribir
+.\.venv\Scripts\python.exe -m streamclipper export  <job>-v2 --selected                  # renderiza los clips del re-puntuado
+.\.venv\Scripts\python.exe -m streamclipper evaluate <job> <job>-v2                      # antes/después
 ```
 
 ### Descargar desde YouTube (solo contenido propio o autorizado)
@@ -50,7 +53,17 @@ cd backend
 
 Opciones de `process`: `--model`, `--label`, `--language es|en`, `--max-clips`, `--min-clip/--max-clip`, `--pre/--post`
 (contexto en s), `--layout blur-fit|fill|crop` (+ `--crop-x/--crop-y/--zoom`), `--min-score`, `--peak-db`,
-`--text-trigger`, `--threads`, `--keep-temp`, `--json`.
+`--text-trigger`, `--lexicon ruta.json`, `--min-word-prob`, `--repeat-min-prob`, `--threads`, `--keep-temp`, `--json`.
+
+**Léxico y confianza:** las reacciones verbales dependen de la confianza de Whisper y, para palabras ambiguas como
+«vamos», de evidencia de énfasis (contexto, repetición confiable, alargamiento, volumen). Reglas y cómo
+personalizarlas: [docs/lexicon.md](docs/lexicon.md). Cada explicación indica la ventana temporal usada y la evidencia
+aceptada o descartada. El reporte avisa cuando la selección es frágil (candidatos con puntuaciones casi empatadas).
+
+`compare` informa por separado: (1) los conjuntos completos de candidatos (IoU, correlación de ranking), (2) dónde cae el
+top-3 de cada job en el ranking del otro y (3) los clips finales. Coincidir en (3) no implica mejor calidad.
+`rescore` aplica el algoritmo actual a un job existente reutilizando su transcripción (`evaluate` explica cada cambio de
+puntuación y marca posibles regresiones); los jobs anteriores sin estadísticas de Whisper siguen funcionando.
 
 Cada ejecución crea `data/jobs/<fecha>-<modelo>[-etiqueta]-<id>/` con `out/clip_NN.mp4` (+ `.ass`), `transcript.json`,
 `result.json` (estado completo), `report.md` / `report.json` (duración, tiempos por etapa, modelo, RAM aproximada,
@@ -79,6 +92,7 @@ backend/streamclipper/
   media/ (ffprobe, audio, validación)   transcription/ (faster-whisper, oraciones)
   analysis/ (audio, texto, límites)     selection/ (candidatos, CandidateScorer, selector)
   render/ (ASS, vertical, clips)        pipeline.py, export.py, compare.py, report.py, cli.py
+  rescore.py, evaluation.py             analysis/lexicon.py, analysis/confidence.py
   core/ (config, logs, memoria, cancelación)
 ```
 
