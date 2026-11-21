@@ -40,14 +40,28 @@ def build_filter(settings: Settings, ass_name: str, layout: Layout | None = None
     )
 
 
+def audio_fade_filter(duration: float, fade_in: float = 0.0, fade_out: float = 0.0) -> str | None:
+    """Filtro de audio con fades en los bordes (None si no hay). No toca el contenido del clip: solo la rampa de
+    los primeros/últimos instantes, que el ajuste de límites ya limitó al hueco previo/posterior al habla."""
+    parts = []
+    if fade_in > 0:
+        parts.append(f"afade=t=in:st=0:d={fade_in:.3f}")
+    if fade_out > 0:
+        parts.append(f"afade=t=out:st={max(0.0, duration - fade_out):.3f}:d={fade_out:.3f}")
+    return ",".join(parts) or None
+
+
 def render_clip(src: Path, start: float, end: float, ass_file: Path, out: Path,
-                settings: Settings, cancel: CancelToken, layout: Layout | None = None) -> None:
+                settings: Settings, cancel: CancelToken, layout: Layout | None = None,
+                fade_in: float = 0.0, fade_out: float = 0.0) -> None:
     part = out.with_name(out.name + ".part")
+    af = audio_fade_filter(end - start, fade_in, fade_out)
     cmd = [
         settings.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
         "-ss", f"{start:.3f}", "-i", src.resolve(), "-t", f"{end - start:.3f}",
         "-filter_complex", build_filter(settings, ass_file.name, layout),
         "-map", "[v]", "-map", "0:a:0?",
+        *(["-af", af] if af else []),
         "-c:v", "libx264", "-preset", settings.x264_preset, "-crf", str(settings.crf),
         "-profile:v", "high", "-threads", str(settings.cpu_threads),
         "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
