@@ -129,7 +129,6 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.cmd == "download":
             cancel = CancelToken()
-            print("Recordatorio: descargá solo contenido propio o que tengas autorización para usar.", file=sys.stderr)
             try:
                 res = download_youtube(
                     args.url, Settings(), _limits(args), dry_run=args.dry_run, cancel=cancel,
@@ -177,7 +176,6 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if looks_like_url(args.input):  # URL: se descarga (o se reutiliza lo ya descargado) y se procesa el MP4
-            print("Recordatorio: procesá solo contenido propio o que tengas autorización para usar.", file=sys.stderr)
             try:
                 res = download_youtube(args.input, Settings(), _limits(args), on_exists="reuse", cancel=cancel,
                                        progress=lambda m: print(f"  {m}", file=sys.stderr))
