@@ -6,13 +6,15 @@ from pathlib import Path
 
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
-from streamclipper.core.errors import CancelledError, InvalidInputError
+from streamclipper.core.errors import InvalidInputError
+from streamclipper.context import load_context
 from streamclipper.core.log import log_event, setup_logging
 from streamclipper.jobs import load_result, resolve_job
 from streamclipper.models import Candidate, Transcript
 from streamclipper.pipeline import fingerprint, settings_from_result
 from streamclipper.render.clips import render_set
 from streamclipper.report import write_reports
+from streamclipper.selection.refine import refine_window
 from streamclipper.selection.selector import overlap_ratio, text_similarity
 
 
@@ -109,11 +111,17 @@ def export_alternatives(
     work.mkdir()
     new_clips: list[dict] = []
     t0 = time.monotonic()
-    out_name = lambda c: names.get(c.rank, f"alt_{c.rank:02d}")
+    def out_name(c):
+        return names.get(c.rank, f"alt_{c.rank:02d}")
+
     try:
         if chosen:
+            windows = None
+            if cfg.refine_bounds:  # mismo ajuste de límites que en el pipeline (el ranking no cambia)
+                ctx, _ = load_context(job_dir, result, cfg, work / "ctx", cancel)
+                windows = {out_name(c): refine_window(c, ctx) for c in chosen}
             new_clips = render_set(src, [(out_name(c), c) for c in chosen], transcript, cfg, work,
-                                   out_dir, cancel, progress, warnings)
+                                   out_dir, cancel, progress, warnings, refined=windows)
     except BaseException:
         for c in chosen:  # sin salidas a medias ante error o cancelación
             for ext in (".mp4", ".mp4.part", ".ass"):

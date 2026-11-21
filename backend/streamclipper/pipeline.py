@@ -20,6 +20,7 @@ from streamclipper.media.ffmpeg import extract_audio, probe
 from streamclipper.render.clips import render_set
 from streamclipper.report import write_reports
 from streamclipper.selection.base import AnalysisContext, CandidateScorer
+from streamclipper.selection.refine import refine_selected
 from streamclipper.selection.selector import find_clips, selection_report
 from streamclipper.transcription.sentences import split_sentences
 from streamclipper.transcription.whisper import transcribe
@@ -182,9 +183,12 @@ def run_pipeline(
                 progress("seleccionar", 1.0, f"{len(chosen)} clip(s) seleccionados de {len(candidates)} candidatos")
 
             with stage("renderizar"):
+                names = [f"clip_{i:02d}" for i in range(1, len(chosen) + 1)]
+                # los límites se ajustan DESPUÉS de elegir: el ranking y las puntuaciones no cambian
+                windows = dict(zip(names, refine_selected(chosen, ctx)))
                 result["clips"] = render_set(
-                    src, [(f"clip_{i:02d}", c) for i, c in enumerate(chosen, 1)],
-                    transcript, settings, work, out_dir, cancel, progress, warnings)
+                    src, list(zip(names, chosen)), transcript, settings, work, out_dir, cancel, progress, warnings,
+                    refined=windows)
 
             with stage("verificar"):
                 pass  # la validación FFprobe/decodificación y los límites de frase ya corrieron en render_set
