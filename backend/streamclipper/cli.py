@@ -1,10 +1,14 @@
 import argparse
+import gc
 import json
 import sys
 
+from streamclipper.compare import compare_jobs, save_comparison
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
 from streamclipper.core.errors import StreamClipperError
+from streamclipper.export import export_alternatives
+from streamclipper.jobs import resolve_job
 from streamclipper.media.ffmpeg import probe
 from streamclipper.pipeline import STAGES, resolve_input, run_pipeline
 
@@ -15,41 +19,83 @@ def _build_parser() -> argparse.ArgumentParser:
 
     pr = sub.add_parser("process", help="Analiza un MP4 y genera hasta N clips verticales")
     pr.add_argument("input", help="Ruta a un MP4 local")
-    pr.add_argument("--model", default="base", help="Modelo faster-whisper (base, small, ...)")
+    pr.add_argument("--model", default="base",
+                    help="Modelo faster-whisper; acepta varios separados por coma (base,small) y los corre "
+                         "uno tras otro, cada uno en su propio job")
+    pr.add_argument("--label", default=None, help="Etiqueta opcional para el nombre del job")
     pr.add_argument("--language", default=None, help="Código de idioma (es, en); por defecto autodetecta")
     pr.add_argument("--max-clips", type=int, default=3)
     pr.add_argument("--min-clip", type=float, default=15.0, help="Duración mínima en s")
     pr.add_argument("--max-clip", type=float, default=60.0, help="Duración máxima en s")
     pr.add_argument("--pre", type=float, default=6.0, help="Contexto previo al momento (s)")
     pr.add_argument("--post", type=float, default=6.0, help="Contexto posterior al momento (s)")
-    pr.add_argument("--min-score", type=float, default=0.35)
+    pr.add_argument("--min-score", type=float, default=0.35, help="Puntuación mínima para generar un clip")
+    pr.add_argument("--peak-db", type=float, default=6.0,
+                    help="dB sobre el nivel habitual para considerar un pico de audio (calibración)")
+    pr.add_argument("--text-trigger", type=float, default=0.5,
+                    help="Reacción verbal mínima (0..1) para considerar una frase (calibración)")
     pr.add_argument("--layout", choices=["blur-fit", "fill", "crop"], default="blur-fit")
     pr.add_argument("--crop-x", type=float, default=0.5, help="Posición horizontal del recorte (0..1)")
     pr.add_argument("--crop-y", type=float, default=0.5, help="Posición vertical del recorte (0..1)")
     pr.add_argument("--zoom", type=float, default=1.0)
     pr.add_argument("--threads", type=int, default=4)
     pr.add_argument("--keep-temp", action="store_true")
-    pr.add_argument("--json", action="store_true", help="Imprime el resultado completo en JSON")
+    pr.add_argument("--json", action="store_true", help="Imprime el reporte completo en JSON")
+
+    ex = sub.add_parser("export", help="Exporta clips de candidatos alternativos de un job, sin retranscribir")
+    ex.add_argument("job", help="Id (o prefijo) del job, o ruta a su carpeta")
+    g = ex.add_mutually_exclusive_group()
+    g.add_argument("--alternatives", type=int, default=None, metavar="N",
+                   help="Exporta los N mejores candidatos no elegidos que no se solapen (por defecto 3)")
+    g.add_argument("--ids", type=int, nargs="+", metavar="RANK", help="Exporta candidatos concretos (columna # de report.md)")
+    ex.add_argument("--layout", choices=["blur-fit", "fill", "crop"], default=None)
+    ex.add_argument("--crop-x", type=float, default=None)
+    ex.add_argument("--crop-y", type=float, default=None)
+    ex.add_argument("--zoom", type=float, default=None)
+
+    cp = sub.add_parser("compare", help="Compara dos jobs del mismo video (p. ej. base vs small)")
+    cp.add_argument("job_a")
+    cp.add_argument("job_b")
 
     pb = sub.add_parser("probe", help="Valida un video con FFprobe")
     pb.add_argument("input")
     return p
 
 
+def _print_result(result: dict) -> None:
+    r = result.get("resources") or {}
+    print(f"\nTarea {result['job_id']}: {result['status']}")
+    if result["error"]:
+        print(f"Error: {result['error']}")
+    for c in result["clips"]:
+        ok = "OK" if c["validation"]["ok"] else "FALLÓ"
+        print(f"  {c['file']}  [{c['start']:.1f}s-{c['end']:.1f}s] puntuación {c['score']:.2f} validación {ok}")
+        print(f"    {c['explanation']}")
+    for w in result["warnings"]:
+        print(f"  Aviso: {w}")
+    print(f"Tiempo total {result.get('total_seconds')} s | RAM pico aprox. {r.get('total_peak_mb_approx')} MB "
+          f"(Python {r.get('python_peak_mb')} MB, FFmpeg {r.get('ffmpeg_peak_mb')} MB)")
+    print(f"Reporte: {result['job_dir']}\\report.md")
+
+
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):  # consolas cp1252 no pueden imprimir «⚠️», «—», etc.
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     args = _build_parser().parse_args(argv)
     try:
         if args.cmd == "probe":
-            s = Settings()
-            print(json.dumps(vars(probe(resolve_input(args.input), s.ffprobe)), indent=2))
+            print(json.dumps(vars(probe(resolve_input(args.input), Settings().ffprobe)), indent=2))
             return 0
 
-        s = Settings(
-            whisper_model=args.model, language=args.language, max_clips=args.max_clips,
-            min_clip=args.min_clip, max_clip=args.max_clip, pre_context=args.pre, post_context=args.post,
-            min_score=args.min_score, layout=args.layout, crop_x=args.crop_x, crop_y=args.crop_y,
-            zoom=args.zoom, cpu_threads=args.threads,
-        )
+        if args.cmd == "compare":
+            s = Settings()
+            text = compare_jobs(args.job_a, args.job_b, s)
+            path = save_comparison(text, resolve_job(args.job_a, s).name, resolve_job(args.job_b, s).name, s)
+            print(text)
+            print(f"Guardado en {path}")
+            return 0
+
         cancel = CancelToken()
 
         def progress(stage: str, frac: float, msg: str) -> None:
@@ -57,27 +103,55 @@ def main(argv: list[str] | None = None) -> int:
                 n = STAGES.index(stage) + 1
                 print(f"[{n}/{len(STAGES)}] {stage:<15} {'listo' if frac == 1.0 and not msg else msg}", file=sys.stderr)
 
-        try:
-            result = run_pipeline(args.input, s, cancel, progress, keep_temp=args.keep_temp)
-        except KeyboardInterrupt:
-            cancel.cancel()
-            print("Cancelado.", file=sys.stderr)
-            return 130
+        if args.cmd == "export":
+            overrides = {k: v for k, v in (("layout", args.layout), ("crop_x", args.crop_x),
+                                           ("crop_y", args.crop_y), ("zoom", args.zoom)) if v is not None}
+            try:
+                out = export_alternatives(args.job, Settings(), count=args.alternatives or 3, ranks=args.ids,
+                                          cancel=cancel, progress=progress, **overrides)
+            except KeyboardInterrupt:
+                cancel.cancel()
+                print("Cancelado.", file=sys.stderr)
+                return 130
+            for c in out["clips"]:
+                print(f"  {c['file']}  [{c['start']:.1f}s-{c['end']:.1f}s] candidato #{c['rank']} "
+                      f"puntuación {c['score']:.2f}")
+            for w in out["warnings"]:
+                print(f"  Aviso: {w}")
+            if not out["clips"]:
+                print("No había alternativos para exportar.")
+            return 0
 
-        if args.json:
-            print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
-        else:
-            print(f"\nTarea {result['job_id']}: {result['status']}")
-            if result["error"]:
-                print(f"Error: {result['error']}")
-            if result.get("note"):
-                print(result["note"])
-            for c in result["clips"]:
-                ok = "OK" if c["validation"]["ok"] else "FALLÓ"
-                print(f"  {c['file']}  [{c['start']:.1f}s-{c['end']:.1f}s] puntuación {c['score']:.2f} validación {ok}")
-                print(f"    {c['explanation']}")
-            print(f"Resultados: {result['job_dir']}")
-        return 0 if result["status"] == "completed" else 1
+        models = [m.strip() for m in args.model.split(",") if m.strip()]
+        job_ids, exit_code = [], 0
+        for model in models:
+            s = Settings(
+                whisper_model=model, language=args.language, max_clips=args.max_clips,
+                min_clip=args.min_clip, max_clip=args.max_clip, pre_context=args.pre, post_context=args.post,
+                min_score=args.min_score, audio_peak_db=args.peak_db, text_trigger=args.text_trigger,
+                layout=args.layout, crop_x=args.crop_x, crop_y=args.crop_y,
+                zoom=args.zoom, cpu_threads=args.threads,
+            )
+            print(f"\n=== Whisper {model} ===", file=sys.stderr)
+            try:
+                result = run_pipeline(args.input, s, cancel, progress, keep_temp=args.keep_temp, label=args.label)
+            except KeyboardInterrupt:
+                cancel.cancel()
+                print("Cancelado.", file=sys.stderr)
+                return 130
+            if args.json:
+                print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+            else:
+                _print_result(result)
+            job_ids.append(result["job_id"])
+            exit_code = exit_code or (0 if result["status"] == "completed" else 1)
+            gc.collect()  # liberar el modelo antes del siguiente
+        if len(job_ids) == 2 and exit_code == 0:
+            s = Settings()
+            text = compare_jobs(job_ids[0], job_ids[1], s)
+            print("\n" + text)
+            print(f"Comparación guardada en {save_comparison(text, job_ids[0], job_ids[1], s)}")
+        return exit_code
     except StreamClipperError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
