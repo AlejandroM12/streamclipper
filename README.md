@@ -17,7 +17,7 @@ python -m venv .venv
 ```
 
 No se modifica el PATH ni se instalan componentes globales. La primera transcripción descarga el modelo Whisper
-(`base` ~150 MB, `small` ~480 MB) en la caché de Hugging Face.
+(`base` ~150 MB, `small` ~480 MB; recomendado `small` para español) en la caché de Hugging Face.
 
 ## Uso
 
@@ -33,6 +33,23 @@ cd backend
 .\.venv\Scripts\python.exe -m streamclipper export  <job>-v2 --selected                  # renderiza los clips del re-puntuado
 .\.venv\Scripts\python.exe -m streamclipper evaluate <job> <job>-v2                      # antes/después
 ```
+
+### Calidad de los clips: subtítulos, límites y presentación
+
+```powershell
+.\.venv\Scripts\python.exe -m streamclipper process "<URL o MP4>" --language es --layout focus --fg-x 0.1   # small por defecto en español
+.\.venv\Scripts\python.exe -m streamclipper rerender <job> --tag stage3 --layout focus --fg-x 0.1          # versión nueva, originales intactos
+```
+
+- **Modelo:** `small` es el recomendado para gameplay en español (mejor transcripción que `base`; costo medido en
+  [docs/models.md](docs/models.md)). `base` sigue disponible.
+- **Subtítulos:** segmentación natural por timestamps de palabra, límites de palabras/caracteres/líneas, lectura mínima, huecos
+  rellenados y marcado de baja confianza **sin cambiar el texto** (`.srt` editable). Reglas en [docs/subtitles.md](docs/subtitles.md).
+- **Inicio y final:** un paso separado de la selección (no cambia el ranking) que cierra el clip en una frase completa poco
+  después de la reacción y conserva contexto previo solo cuando hace falta.
+- **Presentación 1080×1920:** gameplay y subtítulos dentro de márgenes seguros aproximados (`--platform tiktok|reels|shorts`),
+  presets `blur-fit` / `focus` / `fill` / `crop`, fondo desenfocado configurable (`--bg-blur`, `--bg-dim`).
+- `rerender` escribe `rerender_<tag>.md` con la comparación por clip (duración, límites, subtítulos, avisos, render, memoria).
 
 ### Validación con gameplay real y revisión humana
 
@@ -92,7 +109,8 @@ empiece ni termine dentro de una frase o palabra transcrita (si hay indicios de 
 ```powershell
 cd backend
 .\.venv\Scripts\python.exe -m pytest -m "not integration"   # rápidas (~3 s)
-.\.venv\Scripts\python.exe -m pytest                        # todas; incluye FFmpeg + Whisper reales (~90 s)
+.\.venv\Scripts\python.exe -m pytest                        # todas; incluye FFmpeg + Whisper reales (~6 min)
+.\.venv\Scripts\python.exe -m ruff check streamclipper tests tools  # lint
 ```
 
 La integración usa un video sintético (`backend/tools/make_synthetic.py`, voz SAPI de Windows). Valida el pipeline
