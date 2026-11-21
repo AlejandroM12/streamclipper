@@ -252,6 +252,18 @@ class JobManager:
                                                                                  if k not in ("session", "clip")})
         return self.submit_process(old.input, old.params, force=True)
 
+    def delete_session(self, name: str) -> dict:
+        """Elimina una sesión salvo que se esté procesando o tenga una edición en curso o en cola."""
+        from streamclipper.app.sessions import delete_session
+        with self._lock:   # el candado impide que una edición nueva arranque sobre la sesión mientras se borra
+            busy = [j for j in self._jobs.values() if j.status in ACTIVE and name in (j.session, j.params.get("session"))]
+            if busy:
+                raise ApiError(409, "Esta sesión se está procesando o tiene una edición en curso. Cancelá el trabajo o esperá "
+                                    "a que termine antes de eliminarla.")
+            from streamclipper.app.runners import session_dir
+            session_dir(self.settings, name)   # valida el nombre y que exista
+            return delete_session(self.settings, name)
+
     def shutdown(self, timeout: float = 20.0) -> None:
         """Cancela el trabajo en curso y detiene el worker (el estado queda guardado como «interrumpido»)."""
         self._stop = True

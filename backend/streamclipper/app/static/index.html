@@ -215,7 +215,19 @@ async function viewNew(view) {
 
 /* ---------- vista: sesiones ---------- */
 async function viewSessions(view) {
-  const { sessions } = await api("/api/sessions");
+  let { sessions } = await api("/api/sessions");
+  const busy = (s) => s.status === "running" || s.status === "queued";
+  async function remove(s) {
+    const what = s.clips + " clip(s)" + (s.edits ? ", " + s.edits + " edición(es)" : "");
+    if (!confirm("¿Eliminar la sesión «" + s.title + "» (" + fdate(s.created) + ")?\n\nSe borrarán sus clips (" + what + "), subtítulos, valoraciones y exportaciones. " +
+      "No se puede deshacer.\nEl video de origen, los modelos y las demás sesiones no se tocan.")) return;
+    try {
+      await api("/api/sessions/" + encodeURIComponent(s.id) + "/delete", { confirm: true });
+      toast("Sesión eliminada.");
+    } catch (e) { toast(e.message, 6000); }
+    sessions = (await api("/api/sessions")).sessions;   // el historial se vuelve a leer del servidor
+    draw();
+  }
   const filter = el("input", { type: "text", placeholder: "Filtrar por título o modelo…" });
   const grid = el("div", { class: "grid" });
   const draw = () => {
@@ -227,7 +239,9 @@ async function viewSessions(view) {
       el("div", { style: "margin-top:6px" }, el("span", { class: "badge " + s.status }, STATUS[s.status] || s.status), " ",
         el("span", {}, s.clips + " clip(s)"), s.variants.length ? el("span", { class: "mut small" }, " · versiones: " + s.variants.join(", ")) : null,
         s.edits ? el("span", { class: "mut small" }, " · " + s.edits + " edición(es)") : null),
-      s.error ? el("div", { class: "err small" }, s.error) : null)) : [el("div", { class: "mut" }, "No hay sesiones todavía.")]));
+      s.error ? el("div", { class: "err small" }, s.error) : null,
+      el("div", { style: "margin-top:8px" }, el("button", { class: "danger", disabled: busy(s), title: busy(s) ? "No se puede eliminar mientras se procesa" : "",
+        onclick: (ev) => { ev.stopPropagation(); remove(s); } }, "Eliminar sesión")))) : [el("div", { class: "mut" }, "No hay sesiones todavía.")]));
   };
   filter.addEventListener("input", draw);
   view.replaceChildren(el("div", { class: "card" }, el("h2", {}, "Sesiones anteriores"), filter), grid);

@@ -13,9 +13,11 @@ from streamclipper.pipeline import run_pipeline
 
 def session_dir(settings: Settings, name: str) -> Path:
     """Carpeta de una sesión (job). El nombre no puede contener separadores ni salir de data/jobs."""
-    if not re.fullmatch(r"[\w.-]+", name or ""):
+    if not re.fullmatch(r"[\w][\w.-]*", name or ""):
         raise InvalidInputError("Nombre de sesión inválido.")
     d = settings.jobs_dir / name
+    if d.resolve().parent != settings.jobs_dir.resolve():
+        raise InvalidInputError("Nombre de sesión inválido.")
     if not (d / "result.json").is_file():
         raise InvalidInputError("La sesión no existe.")
     return d

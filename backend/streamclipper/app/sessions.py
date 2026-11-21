@@ -134,6 +134,74 @@ def session_detail(settings: Settings, name: str, active: set[str] | None = None
     }
 
 
+def _inside(child: Path, parent: Path) -> bool:
+    """True si `child` es un hijo directo de `parent` (sin enlaces simbólicos ni «..»)."""
+    return not child.is_symlink() and child.resolve().parent == parent.resolve()
+
+
+def delete_plan(settings: Settings, name: str) -> dict:
+    """Qué se borraría al eliminar una sesión (y sus análisis derivados). No toca nada."""
+    from streamclipper.app.runners import session_dir
+    d = session_dir(settings, name)
+    jobs = [d]
+    for other in settings.jobs_dir.iterdir():   # análisis derivados (rescore): no se listan, así que se van con su origen
+        if other.is_dir() and other != d and (other / "result.json").is_file():
+            try:
+                if load_result(other).get("rescored_from") == name:
+                    jobs.append(other)
+            except (OSError, json.JSONDecodeError):
+                continue
+    names = {j.name for j in jobs}
+    exports = [p for n in names if (p := settings.data_dir / "exports" / n).is_dir()]
+    states = [p for p in (settings.data_dir / "app" / "jobs").glob("*.json") if _state_session(p) in names]
+    return {"jobs": jobs, "exports": exports, "app_jobs": states, "names": names}
+
+
+def _state_session(path: Path) -> str | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("session")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def delete_session(settings: Settings, name: str) -> dict:
+    """Elimina una sesión: su carpeta de job, sus derivados, sus exportaciones, sus estados de la app y SUS valoraciones.
+    Solo toca rutas que son hijos directos de data/jobs, data/exports y data/app/jobs; nunca modelos, videos de origen
+    ni otras sesiones. El que llama debe haber comprobado que no se está procesando."""
+    import shutil
+
+    plan = delete_plan(settings, name)
+    removed = {"sessions": [], "exports": [], "ratings": 0}
+    for d in plan["jobs"]:
+        if not _inside(d, settings.jobs_dir):
+            raise ApiError(400, "Ruta de sesión fuera de data/jobs: no se borra.")
+    for e in plan["exports"]:
+        if not _inside(e, settings.data_dir / "exports"):
+            raise ApiError(400, "Ruta de exportación fuera de data/exports: no se borra.")
+    # valoraciones: solo las entradas de esta sesión (el archivo es por video y puede tener otras sesiones)
+    rdir = settings.data_dir / "reviews"
+    for f in rdir.glob("*.ratings.json") if rdir.is_dir() else []:
+        try:
+            store = ReviewStore(f)
+            mine = [k for k, v in store.ratings.items() if v.get("job_id") in plan["names"] or k.split(":")[0] in plan["names"]]
+        except (OSError, json.JSONDecodeError):
+            continue
+        if mine:
+            for k in mine:
+                del store.ratings[k]
+            store._save()
+            removed["ratings"] += len(mine)
+    for p in plan["app_jobs"]:
+        p.unlink(missing_ok=True)
+    for e in plan["exports"]:
+        shutil.rmtree(e)
+        removed["exports"].append(e.name)
+    for d in plan["jobs"]:
+        shutil.rmtree(d)
+        removed["sessions"].append(d.name)
+    return removed
+
+
 def rating_item(settings: Settings, name: str, clip: str, version: str) -> tuple[dict, ReviewStore, dict]:
     """(elemento, almacén, algoritmo) para guardar una evaluación de una versión de un clip."""
     from streamclipper.review import algorithm_info

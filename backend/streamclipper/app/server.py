@@ -159,6 +159,12 @@ def make_handler(ctx: AppContext):
                 if m.group(2) == "cancel":
                     return send_json(self, ctx.manager.cancel(m.group(1)))
                 return send_json(self, ctx.manager.retry(m.group(1)).to_dict(), 201)
+            if m := re.fullmatch(r"/api/sessions/([\w.-]+)/delete", path):
+                if body.get("confirm") is not True:
+                    raise ApiError(400, "Falta la confirmación para eliminar la sesión.")
+                ctx.session(m.group(1))
+                res = ctx.manager.delete_session(m.group(1))
+                return send_json(self, {"ok": True, **res})
             if m := re.fullmatch(r"/api/sessions/([\w.-]+)/(subtitles|edit|rating|export)", path):
                 return self._session_post(m.group(1), m.group(2), body)
             if path == "/api/open-folder":

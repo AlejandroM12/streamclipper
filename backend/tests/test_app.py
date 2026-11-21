@@ -261,3 +261,126 @@ def test_server_binds_loopback_only(server):
         assert s.connect_ex(("127.0.0.1", port)) == 0
     finally:
         s.close()
+
+
+# --- eliminar sesiones ---------------------------------------------------------------------------------
+def make_session(settings, name, derived_from=None, status="completed"):
+    d = settings.jobs_dir / name
+    (d / "out").mkdir(parents=True)
+    (d / "out" / "clip_01.mp4").write_bytes(b"mp4")
+    (d / "result.json").write_text(json.dumps({"job_id": name, "status": status, "clips": [], "candidates": [], "source": "x.mp4",
+                                               **({"rescored_from": derived_from} if derived_from else {})}))
+    exp = settings.data_dir / "exports" / name
+    exp.mkdir(parents=True)
+    (exp / "a.mp4").write_bytes(b"e")
+    sdir = settings.data_dir / "app" / "jobs"
+    sdir.mkdir(parents=True, exist_ok=True)
+    (sdir / f"{name}.json").write_text(json.dumps({"id": name, "session": name, "status": "completed"}))
+    return d
+
+
+def rate(settings, fp, *job_ids):
+    from streamclipper.review import ReviewStore
+    store = ReviewStore.for_source(settings, fp, "x.mp4")
+    for j in job_ids:
+        store.ratings[f"{j}:clip_01"] = {"rating": "good", "job_id": j, "note": ""}
+    store._save()
+    return store.path
+
+
+@pytest.fixture
+def world(settings, tmp_path):
+    keep, gone = make_session(settings, "20261121-170000-keep"), make_session(settings, "20261120-100000-old")
+    derived = make_session(settings, "20261120-100000-old-v2", derived_from="20261120-100000-old")
+    sentinels = {}
+    for rel in ("samples/video.mp4", "reviews/partida1/report.md", "comparisons/c.md", "app/config.json"):
+        p = settings.data_dir / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+        sentinels[rel] = p
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "result.json").write_text("{}")
+    (outside / "precious.txt").write_text("no me borres")
+    ratings = rate(settings, "fp1", "20261121-170000-keep", "20261120-100000-old")
+    return {"keep": keep, "gone": gone, "derived": derived, "sentinels": sentinels, "outside": outside, "ratings": ratings}
+
+
+def test_delete_removes_only_that_session(settings, world):
+    m = make_manager(settings)
+    res = m.delete_session("20261120-100000-old")
+    assert set(res["sessions"]) == {"20261120-100000-old", "20261120-100000-old-v2"}   # el derivado se va con su origen
+    assert not world["gone"].exists() and not world["derived"].exists()
+    assert not (settings.data_dir / "exports" / "20261120-100000-old").exists()
+    assert not (settings.data_dir / "app" / "jobs" / "20261120-100000-old.json").exists()
+    # lo demás sigue intacto
+    assert (world["keep"] / "out" / "clip_01.mp4").exists() and (settings.data_dir / "exports" / "20261121-170000-keep" / "a.mp4").exists()
+    assert (settings.data_dir / "app" / "jobs" / "20261121-170000-keep.json").exists()
+    assert all(p.exists() for p in world["sentinels"].values())
+    assert (world["outside"] / "precious.txt").exists()
+    # valoraciones: solo las de la sesión borrada
+    kept = json.loads(world["ratings"].read_text())["ratings"]
+    assert list(kept) == ["20261121-170000-keep:clip_01"]
+    m.shutdown()
+
+
+def test_delete_blocked_while_processing(settings, world):
+    gate = threading.Event()
+    m = JobManager(settings, runners={"process": runner_ok, "edit": lambda j, c: gate.wait(5)})
+    job = m.submit_edit("20261120-100000-old", "clip_01", {})
+    with pytest.raises(ApiError) as e:
+        m.delete_session("20261120-100000-old")
+    assert e.value.status == 409 and world["gone"].exists()
+    m.delete_session("20261121-170000-keep")      # otra sesión sin trabajos sí se puede
+    gate.set()
+    wait(m, job.id, {"completed"})
+    m.delete_session("20261120-100000-old")
+    assert not world["gone"].exists()
+    m.shutdown()
+
+
+@pytest.mark.parametrize("bad", ["..", ".", "../outside", "..%2foutside", "a/b", r"a\b", r"C:\Windows", "", ".hidden", "no-existe"])
+def test_delete_rejects_paths_outside_jobs(settings, world, bad):
+    m = make_manager(settings)
+    with pytest.raises((ApiError, Exception)) as e:
+        m.delete_session(bad)
+    assert not isinstance(e.value, KeyError)
+    assert (world["outside"] / "precious.txt").exists() and world["gone"].exists() and settings.jobs_dir.exists()
+    m.shutdown()
+
+
+def test_delete_refuses_symlinked_session(settings, world, tmp_path):
+    link = settings.jobs_dir / "20261119-link"
+    try:
+        link.symlink_to(world["outside"], target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("sin permiso para crear enlaces simbólicos")
+    m = make_manager(settings)
+    with pytest.raises(Exception):
+        m.delete_session("20261119-link")
+    assert (world["outside"] / "precious.txt").exists()
+    m.shutdown()
+
+
+def test_api_delete_needs_confirmation_and_updates_history(settings, world):
+    m = make_manager(settings)
+    ctx = AppContext(settings, m, picker=lambda: "", opener=lambda p: None)
+    srv = make_server(ctx, "127.0.0.1", 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_port
+    try:
+        def ids():
+            return {s["id"] for s in req(port, "GET", "/api/sessions")[1]["sessions"]}
+
+        assert "20261120-100000-old" in ids()
+        assert req(port, "POST", "/api/sessions/20261120-100000-old/delete", {})[0] == 400          # sin confirmar
+        assert req(port, "POST", "/api/sessions/20261120-100000-old/delete", {"confirm": "yes"})[0] == 400
+        assert "20261120-100000-old" in ids()
+        assert req(port, "POST", "/api/sessions/..%2foutside/delete", {"confirm": True})[0] in (400, 404)
+        assert req(port, "POST", "/api/sessions/20261120-100000-old/delete", {"confirm": True})[0] == 200
+        assert ids() == {"20261121-170000-keep"}                                                      # historial actualizado
+        assert req(port, "POST", "/api/sessions/20261120-100000-old/delete", {"confirm": True})[0] == 404
+        assert (world["outside"] / "precious.txt").exists()
+    finally:
+        srv.shutdown()
+        m.shutdown()
