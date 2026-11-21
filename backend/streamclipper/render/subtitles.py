@@ -18,6 +18,7 @@ from streamclipper.models import Segment, Word
 _MIN_GAP = 0.04        # separación mínima entre subtítulos consecutivos (s)
 _MAX_WORD_DUR = 1.2    # una palabra no puede "durar" más que esto (marcas de Whisper a veces abarcan pausas)
 _FINAL_HOLD = 0.5      # el último subtítulo permanece un poco más
+_MIN_VISIBLE = 0.08    # una palabra con menos tiempo que este dentro del clip no se puede leer: no se muestra
 _ABS_MIN_CUE = 0.7     # por debajo de esto un subtítulo es ilegible: se une al vecino aunque exceda el máximo de palabras
 _IDEAL_WORDS = 5
 _COMMA_BONUS = 120   # cortar una línea tras una coma gana a equilibrar unas letras de más o de menos
@@ -65,7 +66,7 @@ def clip_words(segments: list[Segment], start: float, end: float) -> list[Word]:
             ws = [Word(s.start + i * step, s.start + (i + 1) * step, t) for i, t in enumerate(toks)]
         for w in ws:
             text = w.text.strip()
-            if text and w.end > start and w.start < end:
+            if text and w.end > start + _MIN_VISIBLE and w.start < end - _MIN_VISIBLE:
                 a = max(w.start, start) - start
                 b = min(w.end, end) - start
                 out.append(Word(a, min(b, a + _MAX_WORD_DUR) if b > a else a + 0.05, text, w.prob))
@@ -217,7 +218,7 @@ def _time_cues(cues: list[Cue], duration: float, cfg, lc: int) -> None:
             else:
                 end = min(last_end + cfg.sub_tail_hold, nxt - _MIN_GAP)
             c.start = c.words[0].start
-            c.end = max(c.start + 0.1, min(end, duration))
+            c.end = min(duration, max(c.start + 0.1, end))   # nunca más allá de la duración del clip
             need = c.start + _required(c, cfg)
             limit = (cues[i + 1].words[0].start - _MIN_GAP) if i + 1 < len(cues) else duration
             if c.end < need:
@@ -351,19 +352,72 @@ def srt_document(cues: list[Cue]) -> str:
                    for i, c in enumerate(cues, 1))
 
 
+def integrity_problems(cues: list[Cue], segments: list[Segment], start: float, end: float, layout, cfg) -> list[str]:
+    """Defectos DEMOSTRABLES de los subtítulos de un clip (lista vacía = ninguno). No juzga la calidad del texto.
+
+    - fuera de la duración del clip, tiempos invertidos o superposición de subtítulos;
+    - líneas o cantidad de líneas por encima de los límites (texto que se saldría de los márgenes);
+    - palabras transcritas del clip omitidas, repetidas o cambiadas (frases truncadas por los límites);
+    - huecos sin subtítulo mientras hay palabras que mostrar (huecos injustificados);
+    - estilo ASS con márgenes distintos de los del layout."""
+    out: list[str] = []
+    dur = end - start
+    for i, c in enumerate(cues):
+        if c.start < -1e-6 or c.end > dur + 1e-6:
+            out.append(f"el subtítulo {i + 1} («{c.text[:30]}») queda fuera de la duración del clip ({c.start:.2f}–{c.end:.2f} s de {dur:.2f} s)")
+        if c.end <= c.start:
+            out.append(f"el subtítulo {i + 1} tiene duración no positiva")
+        if len(c.lines) > cfg.sub_max_lines:
+            out.append(f"el subtítulo {i + 1} tiene {len(c.lines)} líneas (máximo {cfg.sub_max_lines})")
+        too_long = [ln for ln in c.lines if len(ln) > layout.sub_line_chars and " " in ln]
+        if too_long:
+            out.append(f"el subtítulo {i + 1} tiene una línea de {len(too_long[0])} caracteres (máximo {layout.sub_line_chars}): «{too_long[0][:30]}»")
+    for i, (a, b) in enumerate(zip(cues, cues[1:]), 1):
+        if a.end > b.start + 1e-6:
+            out.append(f"los subtítulos {i} y {i + 1} se superponen ({a.end:.2f} s > {b.start:.2f} s)")
+    expected = [w.text for w in clip_words(segments, start, end)]
+    shown = [w.text for c in cues for w in c.words]
+    if shown != expected:
+        missing = [w for w in expected if w not in shown]
+        out.append(f"el texto mostrado no coincide con la transcripción del clip ({len(shown)} de {len(expected)} palabras"
+                   + (f"; faltan: {', '.join(missing[:5])}" if missing else "") + ")")
+    words = clip_words(segments, start, end)
+    for a, b in zip(cues, cues[1:]):
+        inside = [w for w in words if a.end - 1e-6 <= w.start < b.start - 1e-6]
+        if inside:
+            out.append(f"hueco injustificado entre {a.end:.2f} s y {b.start:.2f} s: hay palabras («{inside[0].text}») sin subtítulo")
+    if cues and words and cues[0].start > words[0].start + 1e-6:
+        out.append("el primer subtítulo aparece después de la primera palabra")
+    return out
+
+
+def style_problems(ass_text: str, layout) -> list[str]:
+    """El estilo ASS escrito coincide con los márgenes y la alineación del layout."""
+    style = next((ln for ln in ass_text.splitlines() if ln.startswith("Style:")), "")
+    f = style.split(",")
+    if len(f) < 22:
+        return ["no se encontró el estilo ASS"]
+    got = (int(f[18]), int(f[19]), int(f[20]), int(f[21]))
+    want = (layout.sub_alignment, layout.margin_l, layout.margin_r, layout.sub_margin_v)
+    return [] if got == want else [f"márgenes/alineación del estilo ASS {got} distintos de los del layout {want}"]
+
+
 @dataclass
 class SubtitleResult:
     cues: list[Cue]
     metrics: dict
     low_confidence: list[str]   # textos de los subtítulos con muchas palabras de baja confianza
+    problems: list[str] = field(default_factory=list)   # defectos demostrables (ver integrity_problems)
 
 
 def write_subtitles(ass_path: Path, srt_path: Path | None, segments: list[Segment], start: float, end: float,
                     cfg, layout) -> SubtitleResult:
     cues = build_cues(segments, start, end, cfg, layout.sub_line_chars)
-    ass_path.write_text(ass_document(cues, layout, cfg), encoding="utf-8")
+    doc = ass_document(cues, layout, cfg)
+    ass_path.write_text(doc, encoding="utf-8")
     if srt_path is not None:
         srt_path.write_text(srt_document(cues), encoding="utf-8")
     metrics = cue_metrics([(c.start, c.end, "\\N".join(c.lines)) for c in cues], end - start, cfg.sub_max_cps,
                           cfg.sub_min_duration, layout.sub_line_chars)
-    return SubtitleResult(cues, metrics, [c.text for c in cues if c.low_conf])
+    problems = integrity_problems(cues, segments, start, end, layout, cfg) + style_problems(doc, layout)
+    return SubtitleResult(cues, metrics, [c.text for c in cues if c.low_conf], problems)
