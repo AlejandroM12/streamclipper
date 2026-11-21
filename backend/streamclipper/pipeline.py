@@ -1,5 +1,7 @@
 """Pipeline de extremo a extremo: validar → audio → transcribir → analizar → seleccionar → renderizar."""
+import hashlib
 import json
+import re
 import shutil
 import time
 import uuid
@@ -9,14 +11,13 @@ from typing import Callable
 from streamclipper.analysis.audio import analyze_audio
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
-from streamclipper.core.errors import InvalidInputError, MediaError, StreamClipperError
+from streamclipper.core.errors import CancelledError, InvalidInputError, MediaError, StreamClipperError
 from streamclipper.core.log import log_event, setup_logging
+from streamclipper.core.memory import ResourceMonitor
 from streamclipper.core.sysinfo import available_ram_gb
 from streamclipper.media.ffmpeg import extract_audio, probe
-from streamclipper.media.validate import validate_clip
-from streamclipper.models import Transcript
-from streamclipper.render.ass import write_ass
-from streamclipper.render.vertical import render_clip
+from streamclipper.render.clips import render_set
+from streamclipper.report import write_reports
 from streamclipper.selection.base import AnalysisContext, CandidateScorer
 from streamclipper.selection.selector import find_clips
 from streamclipper.transcription.sentences import split_sentences
@@ -42,6 +43,34 @@ def resolve_input(path_str: str) -> Path:
     return p
 
 
+def fingerprint(path: Path) -> str:
+    """Huella barata (tamaño + primer y último MB) para saber si dos jobs usaron el mismo video."""
+    h = hashlib.sha1()
+    size = path.stat().st_size
+    h.update(str(size).encode())
+    with path.open("rb") as f:
+        h.update(f.read(1 << 20))
+        if size > 2 << 20:
+            f.seek(-(1 << 20), 2)
+            h.update(f.read())
+    return h.hexdigest()[:16]
+
+
+def new_job_dir(settings: Settings, model: str, label: str | None = None) -> tuple[str, Path]:
+    """Cada ejecución tiene su carpeta; el modelo va en el nombre para comparar base vs small."""
+    tag = re.sub(r"[^a-z0-9_.-]", "", model.lower())
+    extra = "-" + re.sub(r"[^a-z0-9_-]", "", label.lower()) if label else ""
+    job_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{tag}{extra}-{uuid.uuid4().hex[:4]}"
+    return job_id, settings.jobs_dir / job_id
+
+
+def settings_from_result(result: dict, **overrides) -> Settings:
+    d = dict(result["settings"])
+    d["data_dir"] = Path(d["data_dir"])
+    d.update(overrides)
+    return Settings(**d)
+
+
 def run_pipeline(
     input_path: str,
     settings: Settings,
@@ -49,25 +78,34 @@ def run_pipeline(
     progress: ProgressFn | None = None,
     scorer: CandidateScorer | None = None,
     keep_temp: bool = False,
+    label: str | None = None,
 ) -> dict:
     cancel = cancel or CancelToken()
     progress = progress or (lambda *_: None)
     settings.validate()
     src = resolve_input(input_path)
 
-    job_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
-    job_dir = settings.jobs_dir / job_id
+    job_id, job_dir = new_job_dir(settings, settings.whisper_model, label)
     work, out_dir = job_dir / "work", job_dir / "out"
     out_dir.mkdir(parents=True)
     work.mkdir()
     setup_logging(job_dir / "job.log")
 
-    result: dict = {"job_id": job_id, "source": str(src), "status": "running", "stages": {},
-                    "settings": {k: v for k, v in vars(settings).items() if k != "data_dir"} | {"data_dir": str(settings.data_dir)},
-                    "clips": [], "candidates": [], "error": None}
+    warnings: list[str] = []
+    result: dict = {
+        "job_id": job_id, "source": str(src), "label": label, "status": "running", "stages": {},
+        "settings": {k: v for k, v in vars(settings).items() if k != "data_dir"} | {"data_dir": str(settings.data_dir)},
+        "clips": [], "alt_clips": [], "candidates": [], "selected": [], "warnings": warnings, "error": None,
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
 
     def save() -> None:
-        (job_dir / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        (job_dir / "result.json").write_text(
+            json.dumps(result, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+
+    def warn(msg: str) -> None:
+        warnings.append(msg)
+        log_event("warning", level=30, message=msg)
 
     def stage(name: str):
         class _S:
@@ -76,6 +114,7 @@ def run_pipeline(
                 self_.t = time.monotonic()
                 progress(name, 0.0, "")
                 log_event("stage_start", stage=name)
+
             def __exit__(self_, et, ev, tb):
                 dt = round(time.monotonic() - self_.t, 2)
                 result["stages"][name] = {"seconds": dt, "ok": et is None}
@@ -85,83 +124,91 @@ def run_pipeline(
                 save()
         return _S()
 
+    t_job = time.monotonic()
+    monitor = ResourceMonitor()
     try:
-        free = shutil.disk_usage(settings.data_dir if settings.data_dir.exists() else job_dir).free / 1024**3
-        if free < settings.min_free_gb:
-            raise MediaError(f"Espacio libre insuficiente: {free:.1f} GB (mínimo {settings.min_free_gb} GB)")
-        ram = available_ram_gb()
-        if ram is not None and ram < 1.0:
-            log_event("low_ram_warning", level=30, available_gb=round(ram, 2))
-            progress("validar", 0.0, f"Aviso: solo {ram:.1f} GB de RAM libres; cerrá programas si falla la transcripción")
+        with monitor:
+            free = shutil.disk_usage(job_dir).free / 1024**3
+            if free < settings.min_free_gb:
+                raise MediaError(f"Espacio libre insuficiente: {free:.1f} GB (mínimo {settings.min_free_gb} GB)")
+            ram = available_ram_gb()
+            if ram is not None and ram < 1.0:
+                warn(f"Solo {ram:.1f} GB de RAM libres al iniciar; cerrá programas si falla la transcripción")
 
-        with stage("validar"):
-            info = probe(src, settings.ffprobe)
-            result["media"] = vars(info)
-            if not info.has_audio:
-                raise InvalidInputError("El video no tiene pista de audio; no se puede analizar")
-            if info.duration < settings.min_clip:
-                raise InvalidInputError(
-                    f"El video dura {info.duration:.1f}s, menos que el clip mínimo ({settings.min_clip:.0f}s)")
+            with stage("validar"):
+                info = probe(src, settings.ffprobe)
+                result["media"] = vars(info)
+                result["source_fingerprint"] = fingerprint(src)
+                if not info.has_audio:
+                    raise InvalidInputError("El video no tiene pista de audio; no se puede analizar")
+                if info.duration < settings.min_clip:
+                    raise InvalidInputError(
+                        f"El video dura {info.duration:.1f}s, menos que el clip mínimo ({settings.min_clip:.0f}s)")
 
-        wav = work / "audio.wav"
-        with stage("extraer_audio"):
-            extract_audio(src, wav, settings.ffmpeg, cancel)
+            wav = work / "audio.wav"
+            with stage("extraer_audio"):
+                extract_audio(src, wav, settings.ffmpeg, cancel)
 
-        with stage("transcribir"):
-            transcript = transcribe(wav, settings, cancel, info.duration,
-                                    lambda f: progress("transcribir", f, f"{f * info.duration:.0f}s / {info.duration:.0f}s"))
-            transcript = split_sentences(transcript)
-            (job_dir / "transcript.json").write_text(
-                json.dumps(transcript.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
-            result["transcript"] = {"language": transcript.language, "segments": len(transcript.segments),
-                                    "words": sum(len(s.words) for s in transcript.segments)}
+            with stage("transcribir"):
+                transcript = transcribe(
+                    wav, settings, cancel, info.duration,
+                    lambda f: progress("transcribir", f, f"{f * info.duration:.0f}s / {info.duration:.0f}s"))
+                transcript = split_sentences(transcript)
+                (job_dir / "transcript.json").write_text(
+                    json.dumps(transcript.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
+                n_words = sum(len(s.words) for s in transcript.segments)
+                result["transcript"] = {"language": transcript.language, "sentences": len(transcript.segments),
+                                        "words": n_words}
+                if n_words == 0:
+                    warn("No se transcribió ninguna palabra: la selección depende solo del audio")
 
-        with stage("analizar_audio"):
-            curve = analyze_audio(wav)
+            with stage("analizar_audio"):
+                curve = analyze_audio(wav)
 
-        with stage("seleccionar"):
-            ctx = AnalysisContext(transcript, curve, info.duration, settings)
-            candidates, chosen = find_clips(ctx, scorer)
-            result["candidates"] = [c.to_dict() for c in candidates[:20]]
-            result["selected"] = [c.to_dict() for c in chosen]
-            result["note"] = None if chosen else (
-                "No se encontraron momentos que superen el umbral; no se generaron clips.")
-            progress("seleccionar", 1.0, f"{len(chosen)} clip(s) seleccionados de {len(candidates)} candidatos")
+            with stage("seleccionar"):
+                ctx = AnalysisContext(transcript, curve, info.duration, settings)
+                candidates, chosen = find_clips(ctx, scorer)
+                for rank, c in enumerate(candidates, 1):
+                    c.rank = rank
+                result["candidates"] = [c.to_dict() for c in candidates]
+                result["selected"] = [c.rank for c in chosen]
+                if not chosen:
+                    result["note"] = "No se encontraron momentos que superen el umbral; no se generaron clips."
+                    warn(result["note"])
+                progress("seleccionar", 1.0, f"{len(chosen)} clip(s) seleccionados de {len(candidates)} candidatos")
 
-        with stage("renderizar"):
-            for i, c in enumerate(chosen, 1):
-                cancel.check()
-                progress("renderizar", (i - 1) / len(chosen), f"clip {i}/{len(chosen)}")
-                ass_work = work / f"clip_{i:02d}.ass"
-                n_lines = write_ass(ass_work, transcript.segments, c.start, c.end)
-                shutil.copy(ass_work, out_dir / ass_work.name)
-                mp4 = out_dir / f"clip_{i:02d}.mp4"
-                render_clip(src, c.start, c.end, ass_work, mp4, settings, cancel)
-                result["clips"].append({"file": str(mp4), "start": round(c.start, 2), "end": round(c.end, 2),
-                                        "score": round(c.score, 3), "subtitle_lines": n_lines,
-                                        "explanation": c.explanation()})
+            with stage("renderizar"):
+                result["clips"] = render_set(
+                    src, [(f"clip_{i:02d}", c) for i, c in enumerate(chosen, 1)],
+                    transcript, settings, work, out_dir, cancel, progress, warnings)
 
-        with stage("verificar"):
-            for clip in result["clips"]:
-                v = validate_clip(Path(clip["file"]), clip["end"] - clip["start"], settings.ffmpeg, settings.ffprobe)
-                clip["validation"] = v
-                if not v["ok"]:
-                    raise MediaError(f"El clip {Path(clip['file']).name} no pasó la validación: {v['problems']}")
+            with stage("verificar"):
+                pass  # la validación FFprobe/decodificación y los límites de frase ya corrieron en render_set
 
-        result["status"] = "completed"
+            result["status"] = "completed"
+    except CancelledError as e:
+        result["status"], result["error"] = "cancelled", str(e)
+        log_event("job_cancelled", level=30)
     except StreamClipperError as e:
-        result["status"] = "cancelled" if type(e).__name__ == "CancelledError" else "failed"
-        result["error"] = str(e)
-        log_event("job_failed", level=40, status=result["status"], error=str(e))
-        for f in out_dir.glob("*.part"):
-            f.unlink(missing_ok=True)
+        result["status"], result["error"] = "failed", str(e)
+        log_event("job_failed", level=40, error=str(e))
     except Exception as e:  # error inesperado: se registra y se informa sin dejar procesos ni temporales
         result["status"] = "failed"
         result["error"] = f"Error inesperado: {type(e).__name__}: {e}"
         log_event("job_crashed", level=40, error=repr(e))
     finally:
+        for f in out_dir.glob("*.part"):
+            f.unlink(missing_ok=True)
+        if result["status"] != "completed":
+            for f in out_dir.glob("clip_*"):  # no dejar salidas a medias de una tarea fallida/cancelada
+                f.unlink(missing_ok=True)
+            result["clips"] = []
         if not keep_temp:
             shutil.rmtree(work, ignore_errors=True)
+        result["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        result["total_seconds"] = round(time.monotonic() - t_job, 2)
+        result["resources"] = monitor.summary()
         save()
+        write_reports(job_dir, result)
     result["job_dir"] = str(job_dir)
     return result

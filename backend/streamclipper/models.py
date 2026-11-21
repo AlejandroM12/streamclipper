@@ -73,6 +73,16 @@ class Candidate:
     components: list[ScoreComponent] = field(default_factory=list)
     score: float = 0.0
     text: str = ""
+    rank: int = 0  # posición por puntuación dentro del video (1 = mejor)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Candidate":
+        return cls(
+            start=d["start"], end=d["end"], anchor=d["anchor"], triggers=d["triggers"],
+            components=[ScoreComponent(c["name"], c["value"], c["weight"], c.get("note", ""))
+                        for c in d["components"]],
+            score=d["score"], text=d.get("text", ""), rank=d.get("rank", 0),
+        )
 
     @property
     def duration(self) -> float:
@@ -87,6 +97,7 @@ class Candidate:
 
     def to_dict(self) -> dict:
         return {
+            "rank": self.rank,
             "start": round(self.start, 2),
             "end": round(self.end, 2),
             "duration": round(self.duration, 2),

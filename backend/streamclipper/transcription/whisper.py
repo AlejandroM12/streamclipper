@@ -1,4 +1,8 @@
+import os
 from pathlib import Path
+
+# la caché de Hugging Face avisa por falta de symlinks en Windows; funciona igual (solo ocupa más)
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
