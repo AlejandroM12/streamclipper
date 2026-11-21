@@ -74,7 +74,7 @@ def test_subtitles_are_relative_to_clip_and_in_order(tmp_path):
     assert lines and lines[0][0] == pytest.approx(1.0, abs=0.01)  # 100 - 99
     for (a0, a1, _), (b0, _, _) in zip(lines, lines[1:]):
         assert a0 < a1 <= b0 + 1e-9  # sin solapes ni tiempos invertidos
-    assert max(l[1] for l in lines) <= 11.0
+    assert max(ln[1] for ln in lines) <= 11.0
     n = write_ass(tmp_path / "x.ass", segs, 99.0, 110.0)
     assert n == len(lines)
     assert "Dialogue:" in (tmp_path / "x.ass").read_text(encoding="utf-8")

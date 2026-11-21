@@ -1,10 +1,8 @@
 import random
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
-from streamclipper.analysis.audio import HOP, curve_from_db
 from streamclipper.compare import (
     Job, best_match, closeness, compare_candidates, compare_clips, compare_data, match_one_to_one,
     render_markdown, spearman, top_locations,
@@ -13,8 +11,6 @@ from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
 from streamclipper.evaluation import evaluate_data, explain_change, render_markdown as eval_markdown
 from streamclipper.models import Candidate, Segment, Transcript, Word
-from streamclipper.selection.base import AnalysisContext
-from streamclipper.selection.heuristic import HeuristicScorer
 from streamclipper.selection.selector import TIE_MARGIN, find_clips, selection_report
 from streamclipper.transcription.sentences import split_sentences
 from streamclipper.transcription.whisper import transcribe
@@ -270,7 +266,9 @@ def test_jobs_without_clips_use_selected_candidates():
 
 def test_different_sources_are_flagged():
     c = [cd(1, 0, 20, .6)]
-    mk = lambda n, fp: Job(type("D", (), {"name": n})(), _result(c, [1], fp=fp), {"segments": []})
+    def mk(n, fp):
+        return Job(type("D", (), {"name": n})(), _result(c, [1], fp=fp), {"segments": []})
+
     assert "NO usaron el mismo archivo" in render_markdown(compare_data(mk("A", "1"), mk("B", "2")))
 
 

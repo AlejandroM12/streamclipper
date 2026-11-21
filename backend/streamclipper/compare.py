@@ -140,7 +140,9 @@ def compare_candidates(ca: list[dict], cb: list[dict]) -> dict:
 
     pairs = match_one_to_one(ca, cb)
     corr = spearman([p[0]["rank"] for p in pairs], [p[1]["rank"] for p in pairs])
-    near_anchor = lambda s, d, tol: sum(1 for x in s if any(abs(x["anchor"] - y["anchor"]) <= tol for y in d))
+    def near_anchor(src, dst, tol):
+        return sum(1 for x in src if any(abs(x["anchor"] - y["anchor"]) <= tol for y in dst))
+
     return {
         "counts": {"a": n_a, "b": n_b},
         "a_with_match": {"iou_0.5": covered(ca, cb, IOU_MATCH), "iou_0.3": covered(ca, cb, IOU_PARTIAL)},
@@ -240,7 +242,9 @@ def render_markdown(d: dict) -> str:
         return "—" if s is None else s
 
     ap = d["avg_prob"]
-    fmt = lambda v: "—" if v is None else f"{v:.3f}"
+    def fmt(v):
+        return "—" if v is None else f"{v:.3f}"
+
     L = [f"# Comparación: {d['a']['name']} vs {d['b']['name']}", ""]
     if not d["same_source"]:
         L += ["⚠️ Los jobs NO usaron el mismo archivo de video: la comparación no es válida.", ""]

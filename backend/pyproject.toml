@@ -11,10 +11,18 @@ dependencies = ["faster-whisper>=1.0", "numpy>=1.26", "yt-dlp", "av>=16,<17"]  #
 
 [project.optional-dependencies]
 api = ["fastapi", "uvicorn[standard]"]
-dev = ["pytest"]
+dev = ["pytest", "ruff"]
 
 [tool.setuptools.packages.find]
 include = ["streamclipper*"]
+
+[tool.ruff]
+line-length = 130
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]   # el código y los textos en español usan líneas largas a propósito
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

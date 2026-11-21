@@ -32,7 +32,6 @@ class ReviewState:
 
 
 def load_state(job_dirs: list[Path], settings: Settings, n_alternatives: int = 10, with_sync: bool = True) -> ReviewState:
-    from streamclipper.pipeline import fingerprint
     state = ReviewState()
     fps = set()
     for idx, d in enumerate(job_dirs):

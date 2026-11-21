@@ -140,7 +140,7 @@ def evaluate_data(jo: Job, jn: Job) -> dict:
 
 def render_markdown(d: dict) -> str:
     c = d["counts"]
-    L = [f"# Evaluación antes/después", "", f"- **Antes:** `{d['old']}`", f"- **Después:** `{d['new']}`", "",
+    L = ["# Evaluación antes/después", "", f"- **Antes:** `{d['old']}`", f"- **Después:** `{d['new']}`", "",
          f"- Candidatos: {c['old']} → {c['new']}; emparejados (IoU ≥ {IOU_MATCH}): {c['matched']}; "
          f"sin equivalente nuevo: {c['removed']}; nuevos sin equivalente anterior: {c['added']}",
          f"- Correlación de ranking (Spearman, pares emparejados): {d['spearman']}",
