@@ -11,6 +11,8 @@ def resolve_job(ref: str, settings: Settings) -> Path:
     if p.is_dir() and (p / "result.json").is_file():
         return p.resolve()
     base = settings.jobs_dir
+    if (base / ref).is_dir() and (base / ref / "result.json").is_file():  # un id exacto siempre gana
+        return base / ref
     matches = [d for d in base.iterdir() if d.is_dir() and ref in d.name] if base.is_dir() else []
     if len(matches) == 1:
         return matches[0]
