@@ -238,8 +238,8 @@ def test_focus_makes_the_gameplay_bigger_and_fit_shows_the_whole_frame():
     focus = compute_layout(1920, 1080, Settings(layout="focus", fg_zoom=1.35))
     assert fit.crop[:2] == (1920, 1080) and fit.fg[1] == 608                     # cuadro completo, sin recortar
     assert focus.fg[1] > fit.fg[1] * 1.3 and focus.crop[0] < 1920                # más grande, recorta costados
-    left = compute_layout(1920, 1080, Settings(layout="focus", fg_x=0.0)).crop[2]
-    right = compute_layout(1920, 1080, Settings(layout="focus", fg_x=1.0)).crop[2]
+    left = compute_layout(1920, 1080, Settings(layout="focus", fg_zoom=1.35, fg_x=0.0)).crop[2]
+    right = compute_layout(1920, 1080, Settings(layout="focus", fg_zoom=1.35, fg_x=1.0)).crop[2]
     assert left == 0 and right == 1920 - focus.crop[0]                           # la facecam puede quedar a cualquier lado
 
 
@@ -400,14 +400,14 @@ def test_previous_context_is_added_only_when_the_moment_depends_on_it():
     dep = [sentence("estábamos esperando a que llegara el tren", 14, 3.0),
            sentence("pero se ha ido sin nosotros", 18, 2.5),           # empieza con conector: depende de la anterior
            sentence("luego hablamos de otra cosa distinta", 30, 3.0)]
-    ctx = make_ctx(60, [(18, 20)], dep, Settings(min_clip=3.0, refine_min_post=1.0))
+    ctx = make_ctx(60, [(18, 20)], dep, Settings(refine_min_clip=None, min_clip=3.0, refine_min_post=1.0))
     r = refine_window(candidate_at(ctx, 19.0, 17.0, 26.0), ctx)
     assert r.start <= 14.0 and any("frase anterior" in n for n in r.notes)
 
     indep = [sentence("estábamos esperando a que llegara el tren", 14, 3.0),
              sentence("¡Mierda, mierda, mierda!", 18, 2.0),             # exclamación corta: NO depende
              sentence("luego hablamos de otra cosa distinta", 30, 3.0)]
-    ctx = make_ctx(60, [(18, 20)], indep, Settings(min_clip=3.0, refine_min_post=1.0))
+    ctx = make_ctx(60, [(18, 20)], indep, Settings(refine_min_clip=None, min_clip=3.0, refine_min_post=1.0))
     r = refine_window(candidate_at(ctx, 19.0, 17.0, 26.0), ctx)
     assert r.start >= 16.5 and not any("frase anterior" in n for n in r.notes)
 
@@ -422,7 +422,7 @@ def test_cuts_snap_to_quiet_moments_and_never_inside_speech():
 
 def test_duration_limits_are_configurable_and_respected():
     segs = scene()
-    ctx = make_ctx(80, [(28, 33)], segs, Settings(min_clip=20.0, max_clip=25.0))
+    ctx = make_ctx(80, [(28, 33)], segs, Settings(refine_min_clip=20.0, refine_max_clip=25.0))
     r = refine_window(candidate_at(ctx, 30.0, 24.0, 46.0), ctx)
     assert 20.0 - 1e-6 <= r.end - r.start <= 25.0 + 1e-6
     assert not check_boundaries(ctx.transcript, r.start, r.end)["errors"]

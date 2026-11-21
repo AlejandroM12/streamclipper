@@ -69,7 +69,7 @@ def test_clips_are_unique_and_do_not_overlap(result):
 
 def test_duration_within_limits(result):
     for c in result["clips"]:
-        assert 15 <= c["end"] - c["start"] <= 60
+        assert 8 <= c["end"] - c["start"] <= 30        # límites del clip final (refine_min_clip / refine_max_clip)
 
 
 def test_output_files_are_valid_h264_aac_1080x1920(result):
@@ -267,7 +267,7 @@ def test_rerender_creates_new_versions_and_never_touches_the_originals(result):
         assert n["validation"]["ok"] and n["boundaries"]["errors"] == []
         info = n["validation"]["info"]
         assert (info["video"]["width"], info["video"]["height"]) == (1080, 1920) and info["audio"]["codec_name"] == "aac"
-        assert 15 <= n["duration"] <= 60 and n["render_seconds"] > 0
+        assert 8 <= n["duration"] <= 30 and n["render_seconds"] > 0
         for k in ("cues", "coverage_pct", "cps_mean", "pct_over_max_cps", "min_cue_duration_s", "comfortable_pct"):
             assert k in n["metrics"] and k in o["metrics"]
         assert n["metrics"]["cues"] > 0 and isinstance(n["issue_count"], int)
@@ -288,6 +288,38 @@ def test_rerender_creates_new_versions_and_never_touches_the_originals(result):
     assert names == ["clip_01", "clip_01@t3", "clip_02", "clip_02@t3"]
     v = next(i for i in items if i["name"] == "clip_01@t3")
     assert v["variant"] == "t3" and v["media"] == "out_t3/clip_01.mp4" and v["media_exists"]
+
+
+def test_version_chain_keeps_everything_intact_and_variants_report_compares_all(result):
+    from streamclipper.core.errors import InvalidInputError
+    from streamclipper.rerender import compare_variants, rerender_job
+
+    job = Path(result["job_dir"])
+    frozen = {p.relative_to(job).as_posix(): p.read_bytes() for p in job.rglob("*") if p.is_file()
+              and p.parent.name in ("out",) or p.name in ("transcript.json", "result.json", "report.json")}
+    a = rerender_job(str(job), Settings(), tag="va", layout="focus", fg_zoom=1.35, fg_x=0.1)
+    after_a = {p.name: p.read_bytes() for p in (job / "out_va").iterdir()}
+    b = rerender_job(str(job), Settings(), tag="vb", layout="focus", keep_regions=["0,0,0.25,0.4", "0.77,0.08,0.2,0.32"],
+                     refine_min_clip=8.0, refine_max_clip=20.0)
+    assert {p.name: p.read_bytes() for p in (job / "out_va").iterdir()} == after_a          # la versión anterior no se toca
+    for rel, data in frozen.items():
+        assert (job / rel).read_bytes() == data, rel                                         # ni originales, ni transcripción, ni ranking
+    for r in b["clips"]:
+        n = r["new"]
+        assert 8 <= n["duration"] <= 20 and n["subtitle_problems"] == [] and n["boundaries"]["errors"] == []
+        assert n["framing"]["regions_kept"] is True and n["framing"]["zoom_used"] < 1.1 and "fade_in" in n
+        assert n["duration_bounds"] == [8.0, 20.0]
+    assert all(r["new"]["framing"]["crop_left_pct"] > 0 for r in a["clips"])               # la versión manual recorta; la conservadora no
+
+    data, md = compare_variants(str(job), ["va", "vb"], Settings())
+    assert data["tags"] == ["va", "vb"] and set(data["clips"]) == {"clip_01", "clip_02"}
+    for name, c in data["clips"].items():
+        assert set(c["versions"]) == {"original", "va", "vb"} and c["versions"]["vb"]["framing"]["regions_kept"] is True
+    for needle in ("| | Original | va | vb |", "Encuadre", "Fades (entrada / salida)", "Defectos demostrables de subtítulos",
+                   "Costo de renderizado y memoria", "no significan un clip mejor ni publicable"):
+        assert needle in md, needle
+    with pytest.raises(InvalidInputError, match="No existe la versión"):
+        compare_variants(str(job), ["va", "nope"], Settings())
 
 
 def test_pipeline_adjusts_bounds_after_selection_without_changing_the_ranking(sample, result, tmp_path):
