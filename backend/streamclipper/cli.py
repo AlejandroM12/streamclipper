@@ -7,7 +7,9 @@ from streamclipper.compare import compare_jobs, save_comparison
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
 from streamclipper.core.errors import StreamClipperError
+from streamclipper.evaluation import evaluate_jobs
 from streamclipper.export import export_alternatives
+from streamclipper.rescore import rescore_job
 from streamclipper.jobs import resolve_job
 from streamclipper.media.download import DownloadLimits, download_youtube, looks_like_url
 from streamclipper.media.ffmpeg import probe
@@ -32,6 +34,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--pre", type=float, default=6.0, help="Contexto previo al momento (s)")
     pr.add_argument("--post", type=float, default=6.0, help="Contexto posterior al momento (s)")
     pr.add_argument("--min-score", type=float, default=0.35, help="Puntuación mínima para generar un clip")
+    _add_lexicon_args(pr)
     pr.add_argument("--peak-db", type=float, default=6.0,
                     help="dB sobre el nivel habitual para considerar un pico de audio (calibración)")
     pr.add_argument("--text-trigger", type=float, default=0.5,
@@ -50,10 +53,22 @@ def _build_parser() -> argparse.ArgumentParser:
     g.add_argument("--alternatives", type=int, default=None, metavar="N",
                    help="Exporta los N mejores candidatos no elegidos que no se solapen (por defecto 3)")
     g.add_argument("--ids", type=int, nargs="+", metavar="RANK", help="Exporta candidatos concretos (columna # de report.md)")
+    g.add_argument("--selected", action="store_true",
+                   help="Renderiza los clips elegidos de un job que no los renderizó (p. ej. tras `rescore`)")
     ex.add_argument("--layout", choices=["blur-fit", "fill", "crop"], default=None)
     ex.add_argument("--crop-x", type=float, default=None)
     ex.add_argument("--crop-y", type=float, default=None)
     ex.add_argument("--zoom", type=float, default=None)
+
+    rs = sub.add_parser("rescore", help="Re-puntúa un job con el algoritmo actual, sin retranscribir ni descargar")
+    rs.add_argument("job", help="Id (o fragmento) del job, o ruta a su carpeta")
+    rs.add_argument("--suffix", default="rescored", help="Sufijo del job nuevo")
+    rs.add_argument("--evaluate", action="store_true", help="Imprime y guarda la evaluación antes/después")
+    _add_lexicon_args(rs)
+
+    ev = sub.add_parser("evaluate", help="Evalúa antes/después: job original vs job re-puntuado")
+    ev.add_argument("old")
+    ev.add_argument("new")
 
     cp = sub.add_parser("compare", help="Compara dos jobs del mismo video (p. ej. base vs small)")
     cp.add_argument("job_a")
@@ -68,6 +83,19 @@ def _build_parser() -> argparse.ArgumentParser:
     dl.add_argument("--dry-run", action="store_true",
                     help="Solo valida la URL y consulta duración/tamaño/licencia; no descarga")
     return p
+
+
+def _add_lexicon_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--lexicon", default=None, help="JSON que amplía o ajusta el léxico de reacciones (docs/lexicon.md)")
+    p.add_argument("--min-word-prob", type=float, default=None,
+                   help="Confianza mínima de Whisper para que una palabra de reacción cuente (defecto 0.4)")
+    p.add_argument("--repeat-min-prob", type=float, default=None,
+                   help="Confianza media mínima para que una repetición cuente (defecto 0.6)")
+
+
+def _lexicon_overrides(args) -> dict:
+    return {k: v for k, v in (("lexicon_path", args.lexicon), ("min_word_prob", args.min_word_prob),
+                              ("repeat_min_prob", args.repeat_min_prob)) if v is not None}
 
 
 def _add_download_args(p: argparse.ArgumentParser, with_url: bool = False) -> None:
@@ -141,6 +169,27 @@ def main(argv: list[str] | None = None) -> int:
             _print_download(res)
             return 0
 
+        if args.cmd == "rescore":
+            s = Settings()
+            old_name = resolve_job(args.job, s).name
+            res = rescore_job(old_name, s, suffix=args.suffix, **_lexicon_overrides(args))
+            print(f"Job re-puntuado: {res['job_id']}  (candidatos {len(res['candidates'])}, "
+                  f"seleccionados {len(res['selected'])})\nReporte: {res['job_dir']}\\report.md")
+            for w in res["warnings"][1:]:
+                print(f"  Aviso: {w}")
+            if args.evaluate:
+                data, text = evaluate_jobs(old_name, res["job_id"], s)
+                print("\n" + text)
+                print(f"Guardado en {save_comparison(text, old_name, res['job_id'], s, kind='eval')}")
+            return 0
+
+        if args.cmd == "evaluate":
+            s = Settings()
+            data, text = evaluate_jobs(args.old, args.new, s)
+            print(text)
+            print(f"Guardado en {save_comparison(text, resolve_job(args.old, s).name, resolve_job(args.new, s).name, s, kind='eval')}")
+            return 0
+
         if args.cmd == "compare":
             s = Settings()
             text = compare_jobs(args.job_a, args.job_b, s)
@@ -161,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
                                            ("crop_y", args.crop_y), ("zoom", args.zoom)) if v is not None}
             try:
                 out = export_alternatives(args.job, Settings(), count=args.alternatives or 3, ranks=args.ids,
-                                          cancel=cancel, progress=progress, **overrides)
+                                          cancel=cancel, progress=progress, selected=args.selected, **overrides)
             except KeyboardInterrupt:
                 cancel.cancel()
                 print("Cancelado.", file=sys.stderr)
@@ -193,6 +242,7 @@ def main(argv: list[str] | None = None) -> int:
                 whisper_model=model, language=args.language, max_clips=args.max_clips,
                 min_clip=args.min_clip, max_clip=args.max_clip, pre_context=args.pre, post_context=args.post,
                 min_score=args.min_score, audio_peak_db=args.peak_db, text_trigger=args.text_trigger,
+                **_lexicon_overrides(args),
                 layout=args.layout, crop_x=args.crop_x, crop_y=args.crop_y,
                 zoom=args.zoom, cpu_threads=args.threads,
             )

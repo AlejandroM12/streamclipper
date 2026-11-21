@@ -44,9 +44,13 @@ def export_alternatives(
     ranks: list[int] | None = None,
     cancel: CancelToken | None = None,
     progress=None,
+    selected: bool = False,
     **setting_overrides,
 ) -> dict:
-    """Renderiza candidatos alternativos (por cantidad o por número de ranking) reutilizando transcript.json."""
+    """Renderiza candidatos alternativos (por cantidad o por número de ranking) reutilizando transcript.json.
+
+    Con `selected=True` renderiza los clips ELEGIDOS de un job que no los renderizó (p. ej. re-puntuado con
+    `rescore`), con los nombres clip_NN."""
     cancel = cancel or CancelToken()
     progress = progress or (lambda *_: None)
     job_dir = resolve_job(job_ref, settings)
@@ -64,10 +68,19 @@ def export_alternatives(
     transcript = Transcript.from_dict(json.loads((job_dir / "transcript.json").read_text(encoding="utf-8")))
     cands = [Candidate.from_dict(d) for d in result["candidates"]]
     by_rank = {c.rank: c for c in cands}
-    done = set(result["selected"]) | {a["rank"] for a in result.get("alt_clips", [])}
-    taken = [by_rank[r] for r in done if r in by_rank]
+    # «exportado» = renderizado. Los seleccionados de un job re-puntuado todavía no lo están.
+    done = {c["rank"] for c in result.get("clips", [])} | {a["rank"] for a in result.get("alt_clips", [])}
+    taken = [by_rank[r] for r in (set(result["selected"]) | done) if r in by_rank]  # para evitar solapes
+    names = {}
 
     warnings: list[str] = []
+    if selected:
+        if result.get("clips"):
+            raise InvalidInputError("Este job ya tiene sus clips seleccionados renderizados")
+        if not result["selected"]:
+            raise InvalidInputError("El job no seleccionó ningún clip")
+        ranks = list(result["selected"])
+        names = {r: f"clip_{i:02d}" for i, r in enumerate(ranks, 1)}
     if ranks:
         missing = [r for r in ranks if r not in by_rank]
         if missing:
@@ -92,27 +105,24 @@ def export_alternatives(
     setup_logging(job_dir / "job.log")
     work = job_dir / f"work_export_{int(time.time())}"
     out_dir = job_dir / "out"
+    out_dir.mkdir(exist_ok=True)
     work.mkdir()
     new_clips: list[dict] = []
     t0 = time.monotonic()
+    out_name = lambda c: names.get(c.rank, f"alt_{c.rank:02d}")
     try:
         if chosen:
-            new_clips = render_set(src, [(f"alt_{c.rank:02d}", c) for c in chosen], transcript, cfg, work,
+            new_clips = render_set(src, [(out_name(c), c) for c in chosen], transcript, cfg, work,
                                    out_dir, cancel, progress, warnings)
-    except CancelledError:
-        for c in chosen:  # sin salidas a medias
+    except BaseException:
+        for c in chosen:  # sin salidas a medias ante error o cancelación
             for ext in (".mp4", ".mp4.part", ".ass"):
-                (out_dir / f"alt_{c.rank:02d}{ext}").unlink(missing_ok=True)
-        raise
-    except Exception:
-        for c in chosen:
-            for ext in (".mp4", ".mp4.part", ".ass"):
-                (out_dir / f"alt_{c.rank:02d}{ext}").unlink(missing_ok=True)
+                (out_dir / f"{out_name(c)}{ext}").unlink(missing_ok=True)
         raise
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
-    result.setdefault("alt_clips", []).extend(new_clips)
+    result.setdefault("clips" if selected else "alt_clips", []).extend(new_clips)
     result["warnings"].extend(warnings)
     result.setdefault("export_runs", []).append({
         "at": time.strftime("%Y-%m-%dT%H:%M:%S"), "ranks": [c.rank for c in chosen],
