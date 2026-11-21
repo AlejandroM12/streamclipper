@@ -45,6 +45,13 @@ class Settings:
     repeat_min_prob: float = 0.6      # una repetición solo cuenta si su confianza media es al menos esta
     # ajuste de límites del clip (después de elegir el momento; no cambia el ranking)
     refine_bounds: bool = True
+    # Duración del clip FINAL. min_clip/max_clip definen la ventana candidata que se puntúa (y por tanto el ranking);
+    # estos definen cuánto puede durar el clip ya ajustado. None = usar min_clip/max_clip (comportamiento anterior).
+    refine_min_clip: float | None = 8.0
+    refine_max_clip: float | None = 30.0
+    refine_fades: bool = True               # pequeña transición de audio en los bordes cuando el corte cae sobre sonido
+    refine_fade_in: float = 0.12            # s máximos de fade-in (nunca invade el habla)
+    refine_fade_out: float = 0.30           # s máximos de fade-out (nunca invade el habla)
     refine_lead: float = 1.0                # s de margen antes de la frase que contiene el momento
     refine_tail: float = 0.6                # s de margen después de que termina la reacción
     refine_min_post: float = 2.5            # s mínimos que se conservan después del momento principal
@@ -70,8 +77,11 @@ class Settings:
     crop_x: float = 0.5
     crop_y: float = 0.5
     zoom: float = 1.0
-    fg_zoom: float = 1.35                   # focus: cuánto se acerca el gameplay (recorta los costados)
+    fg_zoom: float = 1.2                    # focus: cuánto se acerca el gameplay como máximo (recorta los costados)
     fg_x: float = 0.5                       # focus: posición horizontal del recorte (0 = izquierda, 1 = derecha)
+    # Regiones que NO deben recortarse, indicadas a mano como "x,y,w,h" normalizados (0..1) del cuadro original, p. ej. la
+    # facecam o un HUD. No hay detección visual: el sistema solo respeta lo que se declara aquí.
+    keep_regions: list[str] = field(default_factory=list)
     bg_blur: int = 30                       # radio del desenfoque del fondo (0 = sin desenfoque)
     bg_dim: float = 0.08                    # oscurecimiento del fondo (0..0.5) para que se lean los subtítulos
     safe_platform: str = "universal"        # universal | tiktok | reels | shorts (márgenes seguros aproximados)
@@ -80,6 +90,12 @@ class Settings:
     crf: int = 21
     # recursos
     min_free_gb: float = 5.0
+
+    def clip_bounds(self) -> tuple[float, float]:
+        """(mínimo, máximo) de duración del clip final. Nunca supera max_clip; el mínimo nunca supera el máximo."""
+        hi = min(self.refine_max_clip if self.refine_max_clip is not None else self.max_clip, self.max_clip)
+        lo = self.refine_min_clip if self.refine_min_clip is not None else self.min_clip
+        return min(lo, hi), hi
 
     @property
     def ffmpeg(self) -> Path:
@@ -115,6 +131,16 @@ class Settings:
                 and 0 <= self.refine_max_extend <= 15 and 0 <= self.refine_burst_gap <= 5
                 and 1 <= self.refine_max_post <= 30):
             raise InvalidInputError("Parámetros de ajuste de límites fuera de rango")
+        for name in ("refine_min_clip", "refine_max_clip"):
+            v = getattr(self, name)
+            if v is not None and not 8 <= v <= 30:
+                raise InvalidInputError(f"{name} debe estar entre 8 y 30 s (o ser None para usar min_clip/max_clip)")
+        if self.refine_min_clip is not None and self.refine_max_clip is not None and self.refine_min_clip > self.refine_max_clip:
+            raise InvalidInputError("refine_min_clip no puede superar refine_max_clip")
+        if not (0 <= self.refine_fade_in <= 1 and 0 <= self.refine_fade_out <= 2):
+            raise InvalidInputError("refine_fade_in en [0,1] y refine_fade_out en [0,2]")
+        for r in self.keep_regions:
+            parse_region(r)
         if self.pre_context < 0 or self.post_context < 0:
             raise InvalidInputError("El contexto no puede ser negativo")
         if not (0 <= self.min_word_prob <= 1 and 0 <= self.repeat_min_prob <= 1):
@@ -127,3 +153,14 @@ def recommended_model(language: str | None) -> str:
     """Modelo Whisper recomendado: small para español (mediciones en gameplay: transcripción claramente mejor que
     base) y cuando no se indica idioma; base para otros idiomas, donde todavía no hay mediciones propias."""
     return "small" if language in (None, "es") else "base"
+
+
+def parse_region(text: str) -> tuple[float, float, float, float]:
+    """Región «x,y,w,h» normalizada (0..1) del cuadro original. Lanza InvalidInputError si no es válida."""
+    try:
+        x, y, w, h = (float(v) for v in str(text).split(","))
+    except ValueError:
+        raise InvalidInputError(f"Región inválida '{text}': se espera x,y,w,h con números entre 0 y 1") from None
+    if not (0 <= x < 1 and 0 <= y < 1 and 0 < w <= 1 and 0 < h <= 1 and x + w <= 1.0001 and y + h <= 1.0001):
+        raise InvalidInputError(f"Región fuera del cuadro '{text}': x,y,w,h deben estar en [0,1] y x+w, y+h <= 1")
+    return x, y, w, h
