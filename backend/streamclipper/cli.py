@@ -5,11 +5,12 @@ import sys
 
 from streamclipper.compare import compare_jobs, save_comparison
 from streamclipper.core.cancel import CancelToken
-from streamclipper.core.config import Settings
+from streamclipper.core.config import Settings, recommended_model
 from streamclipper.core.errors import StreamClipperError
 from streamclipper.evaluation import evaluate_jobs
 from streamclipper.export import export_alternatives
 from streamclipper.jobs import load_result
+from streamclipper.rerender import rerender_job
 from streamclipper.rescore import rescore_job
 from streamclipper.review import ReviewStore, coverage_against_reviews, write_alternatives
 from streamclipper.review_server import load_state, serve
@@ -27,9 +28,10 @@ def _build_parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("process", help="Analiza un MP4 y genera hasta N clips verticales")
     pr.add_argument("input", help="Ruta a un MP4 local, o URL HTTPS de YouTube (se descarga a data/samples/)")
     _add_download_args(pr)
-    pr.add_argument("--model", default="base",
-                    help="Modelo faster-whisper; acepta varios separados por coma (base,small) y los corre "
-                         "uno tras otro, cada uno en su propio job")
+    pr.add_argument("--model", default=None,
+                    help="Modelo faster-whisper; acepta varios separados por coma (base,small) y los corre uno tras "
+                         "otro, cada uno en su propio job. Por defecto: small para español (recomendado en gameplay) "
+                         "o si no se indica idioma; base para otros idiomas")
     pr.add_argument("--label", default=None, help="Etiqueta opcional para el nombre del job")
     pr.add_argument("--language", default=None, help="Código de idioma (es, en); por defecto autodetecta")
     pr.add_argument("--max-clips", type=int, default=3)
@@ -43,7 +45,9 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="dB sobre el nivel habitual para considerar un pico de audio (calibración)")
     pr.add_argument("--text-trigger", type=float, default=0.5,
                     help="Reacción verbal mínima (0..1) para considerar una frase (calibración)")
-    pr.add_argument("--layout", choices=["blur-fit", "fill", "crop"], default="blur-fit")
+    pr.add_argument("--layout", choices=["blur-fit", "focus", "fill", "crop"], default="blur-fit",
+                    help="Presentación vertical: blur-fit (cuadro completo), focus (gameplay más grande), fill, crop")
+    _add_style_args(pr)
     pr.add_argument("--crop-x", type=float, default=0.5, help="Posición horizontal del recorte (0..1)")
     pr.add_argument("--crop-y", type=float, default=0.5, help="Posición vertical del recorte (0..1)")
     pr.add_argument("--zoom", type=float, default=1.0)
@@ -87,6 +91,14 @@ def _build_parser() -> argparse.ArgumentParser:
     rr = sub.add_parser("reviews", help="Resume las evaluaciones humanas y cómo se ubica un job frente a ellas")
     rr.add_argument("jobs", nargs="+")
 
+    rr2 = sub.add_parser("rerender", help="Genera una versión nueva de los clips de un job (límites, subtítulos y "
+                                          "presentación actuales) sin tocar los originales ni retranscribir")
+    rr2.add_argument("job")
+    rr2.add_argument("--tag", default="stage3", help="Etiqueta de la versión (carpeta out_<tag>)")
+    rr2.add_argument("--overwrite", action="store_true", help="Reemplaza la carpeta out_<tag> si existe (nunca los originales)")
+    rr2.add_argument("--layout", choices=["blur-fit", "focus", "fill", "crop"], default=None)
+    _add_style_args(rr2)
+
     rs = sub.add_parser("rescore", help="Re-puntúa un job con el algoritmo actual, sin retranscribir ni descargar")
     rs.add_argument("job", help="Id (o fragmento) del job, o ruta a su carpeta")
     rs.add_argument("--suffix", default="rescored", help="Sufijo del job nuevo")
@@ -110,6 +122,43 @@ def _build_parser() -> argparse.ArgumentParser:
     dl.add_argument("--dry-run", action="store_true",
                     help="Solo valida la URL y consulta duración/tamaño/licencia; no descarga")
     return p
+
+
+_STYLE_FLAGS = [  # (flag, campo de Settings, tipo, ayuda)
+    ("--fg-zoom", "fg_zoom", float, "focus: acercamiento del gameplay (1-2.5; recorta los costados)"),
+    ("--fg-x", "fg_x", float, "focus: posición horizontal del recorte (0 = izquierda, 1 = derecha)"),
+    ("--bg-blur", "bg_blur", int, "radio del desenfoque del fondo (0 = sin desenfoque)"),
+    ("--bg-dim", "bg_dim", float, "oscurecimiento del fondo (0-0.5)"),
+    ("--platform", "safe_platform", str, "márgenes seguros: universal, tiktok, reels, shorts"),
+    ("--sub-max-words", "sub_max_words", int, "máximo de palabras por subtítulo"),
+    ("--sub-line-chars", "sub_line_chars", int, "máximo de caracteres por línea (por defecto se deriva de la fuente)"),
+    ("--sub-max-lines", "sub_max_lines", int, "máximo de líneas por subtítulo"),
+    ("--sub-min-duration", "sub_min_duration", float, "duración mínima de lectura de un subtítulo (s)"),
+    ("--sub-max-cps", "sub_max_cps", float, "caracteres por segundo cómodos de leer"),
+    ("--sub-font-size", "sub_font_size", int, "tamaño de fuente de los subtítulos"),
+    ("--refine-lead", "refine_lead", float, "margen antes del momento (s)"),
+    ("--refine-tail", "refine_tail", float, "margen después de la reacción (s)"),
+    ("--refine-min-post", "refine_min_post", float, "segundos mínimos que se conservan tras el momento principal"),
+]
+
+
+def _add_style_args(p: argparse.ArgumentParser) -> None:
+    """Presentación, subtítulos y límites. Sin valor se usa el de Settings (o el del job en `rerender`)."""
+    for flag, _, typ, help_ in _STYLE_FLAGS:
+        p.add_argument(flag, type=typ, default=None, help=help_)
+    p.add_argument("--mark-low-conf", action="store_true", default=None,
+                   help="Colorea las palabras de baja confianza en el video (para revisar; no para publicar)")
+    p.add_argument("--no-refine", action="store_true", default=None, help="No ajustar el inicio y el final de los clips")
+
+
+def _style_overrides(args) -> dict:
+    out = {field: getattr(args, flag[2:].replace("-", "_")) for flag, field, _, _ in _STYLE_FLAGS
+           if getattr(args, flag[2:].replace("-", "_"), None) is not None}
+    if getattr(args, "mark_low_conf", None):
+        out["sub_mark_low_conf"] = True
+    if getattr(args, "no_refine", None):
+        out["refine_bounds"] = False
+    return out
 
 
 def _add_lexicon_args(p: argparse.ArgumentParser) -> None:
@@ -254,6 +303,31 @@ def main(argv: list[str] | None = None) -> int:
                              else "ningún candidato"))
             return 0
 
+        if args.cmd == "rerender":
+            s = Settings()
+            ov = _style_overrides(args)
+            if args.layout:
+                ov["layout"] = args.layout
+            cancel = CancelToken()
+            try:
+                m = rerender_job(args.job, s, tag=args.tag, overwrite=args.overwrite, cancel=cancel,
+                                 progress=lambda st, f, msg: print(f"  {msg}", file=sys.stderr) if msg else None, **ov)
+            except KeyboardInterrupt:
+                cancel.cancel()
+                print("Cancelado.", file=sys.stderr)
+                return 130
+            cps = m["settings"]["sub_max_cps"]
+            for r in m["clips"]:
+                o, n = r["original"], r["new"]
+                print(f"  {r['name']}: {o['start']}-{o['end']}s ({o['duration']}s) -> {n['start']}-{n['end']}s ({n['duration']}s) | "
+                      f"subtítulos {o['metrics']['cues']}->{n['metrics']['cues']} | "
+                      f">{cps:g} cps: {o['metrics'].get('pct_over_max_cps')}%->{n['metrics'].get('pct_over_max_cps')}% | "
+                      f"avisos {o['issue_count']}->{n['issue_count']}")
+                print(f"    {n['file']}")
+            print(f"\nInforme: {m['job_dir']}\\rerender_{args.tag}.md")
+            print(f"Memoria máx. (aprox.): {m['resources']['total_peak_mb_approx']} MB | render: {m['timing']['new_render_total_s']} s")
+            return 0
+
         if args.cmd == "rescore":
             s = Settings()
             old_name = resolve_job(args.job, s).name
@@ -320,6 +394,9 @@ def main(argv: list[str] | None = None) -> int:
             _print_download(res)
             args.input = str(res.path)
 
+        if args.model is None:
+            args.model = recommended_model(args.language)
+            print(f"Modelo Whisper: {args.model} (recomendado; usá --model base para más velocidad)", file=sys.stderr)
         models = [m.strip() for m in args.model.split(",") if m.strip()]
         job_ids, exit_code = [], 0
         for model in models:
@@ -329,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
                 min_score=args.min_score, audio_peak_db=args.peak_db, text_trigger=args.text_trigger,
                 **_lexicon_overrides(args),
                 layout=args.layout, crop_x=args.crop_x, crop_y=args.crop_y,
-                zoom=args.zoom, cpu_threads=args.threads,
+                zoom=args.zoom, cpu_threads=args.threads, **_style_overrides(args),
             )
             print(f"\n=== Whisper {model} ===", file=sys.stderr)
             try:

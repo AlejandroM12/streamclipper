@@ -129,6 +129,8 @@ def estimate_sync(mp4: Path, lines: list[tuple[float, float, str]], duration: fl
         sub_total = sub.sum() * step
         return {"available": True, "lag_s": round(best * step, 2), "corr_at_best": round(corr[best], 2),
                 "corr_at_zero": round(corr[0], 2),
+                # con correlación baja el "mejor" desfase es ruido (audio con música/efectos): no es una medición
+                "reliable": bool(corr[best] >= SYNC_CORR_WARN),
                 "subtitle_in_speech_pct": round(min(100.0, 100 * (sub * sp).sum() * step / sub_total), 0) if sub_total else None,
                 "speech_without_subtitle_pct": round(100 * (sp * (1 - sub)).sum() / max(1.0, sp.sum()), 0)}
     except Exception as e:  # el análisis de sincronía nunca debe impedir la revisión
@@ -183,11 +185,12 @@ def subtitle_report(clip: dict, transcript: Transcript, ffmpeg: Path | None, wit
         sync = estimate_sync(mp4, lines, dur, ffmpeg)
         out["sync"] = sync
         if sync.get("available"):
-            if abs(sync["lag_s"]) >= SYNC_LAG_WARN_S:
+            if not sync["reliable"]:
+                issues.append(f"la estimación de sincronía no es confiable (correlación {sync['corr_at_best']}): "
+                              "el audio mezcla voz con música o efectos; revisá la sincronía a oído")
+            elif abs(sync["lag_s"]) >= SYNC_LAG_WARN_S:
                 issues.append(f"desfase estimado de {sync['lag_s']:+.1f} s respecto de la voz "
                               f"({'tardíos' if sync['lag_s'] > 0 else 'adelantados'})")
-            if sync["corr_at_zero"] < SYNC_CORR_WARN:
-                issues.append(f"baja correlación subtítulo↔voz ({sync['corr_at_zero']}): pueden faltar o sobrar líneas")
             if sync.get("speech_without_subtitle_pct") and sync["speech_without_subtitle_pct"] >= 20:
                 issues.append(f"{sync['speech_without_subtitle_pct']:.0f} % de la voz detectada no tiene subtítulo")
     return out
@@ -209,11 +212,12 @@ def _audio_signals(cand: dict | None, clip_start: float) -> dict:
 
 
 def _item(job_dir: Path, result: dict, transcript: Transcript, entry: dict, kind: str, settings: Settings,
-          with_sync: bool, cand_by_rank: dict) -> dict:
+          with_sync: bool, cand_by_rank: dict, out_name: str = "out", variant: str | None = None) -> dict:
     cand = cand_by_rank.get(entry["rank"])
+    shown = f"{entry['name']}@{variant}" if variant else entry["name"]
     item = {
-        "id": f"{result['job_id']}:{entry['name']}", "job_id": result["job_id"],
-        "model": result["settings"]["whisper_model"], "kind": kind, "name": entry["name"], "rank": entry["rank"],
+        "id": f"{result['job_id']}:{shown}", "job_id": result["job_id"], "variant": variant or "original",
+        "model": result["settings"]["whisper_model"], "kind": kind, "name": shown, "rank": entry["rank"],
         "start": entry["start"], "end": entry["end"], "duration": round(entry["end"] - entry["start"], 2),
         "score": entry["score"], "triggers": entry.get("triggers") or (cand or {}).get("triggers", []),
         "components": [{"name": c["name"], "value": c["value"], "weight": c["weight"], "contribution": c["contribution"],
@@ -225,8 +229,8 @@ def _item(job_dir: Path, result: dict, transcript: Transcript, entry: dict, kind
     }
     if kind != "candidate":
         # la ruta sale del nombre dentro del job (no de la ruta absoluta guardada): sirve si la carpeta se movió
-        mp4 = job_dir / "out" / f"{entry['name']}.mp4"
-        item["media"] = f"out/{entry['name']}.mp4"
+        mp4 = job_dir / out_name / f"{entry['name']}.mp4"
+        item["media"] = f"{out_name}/{entry['name']}.mp4"
         item["media_exists"] = mp4.is_file()
         item["validation_ok"] = entry.get("validation", {}).get("ok")
         item["subtitles"] = subtitle_report({**entry, "file": str(mp4)}, transcript,
@@ -234,12 +238,32 @@ def _item(job_dir: Path, result: dict, transcript: Transcript, entry: dict, kind
     return item
 
 
+def _variants(job_dir: Path) -> dict[str, list[dict]]:
+    """Versiones nuevas de los clips generadas por `rerender` (rerender_<etiqueta>.json)."""
+    out: dict[str, list[dict]] = {}
+    for p in sorted(job_dir.glob("rerender_*.json")):
+        try:
+            m = json.loads(p.read_text(encoding="utf-8"))
+            out[m["tag"]] = [{**c["new"], "name": c["name"], "rank": c["rank"], "score": c["score"]} for c in m["clips"]]
+        except (OSError, KeyError, json.JSONDecodeError):
+            continue
+    return out
+
+
 def build_items(job_dir: Path, settings: Settings, n_alternatives: int = 10, with_sync: bool = True) -> list[dict]:
     """Clips renderizados, alternativos renderizados y hasta n candidatos alternativos sin renderizar."""
     result = load_result(job_dir)
     transcript = Transcript.from_dict(json.loads((job_dir / "transcript.json").read_text(encoding="utf-8")))
     by_rank = {c["rank"]: c for c in result.get("candidates", [])}
-    items = [_item(job_dir, result, transcript, c, "clip", settings, with_sync, by_rank) for c in result.get("clips", [])]
+    variants = _variants(job_dir)
+    items = []
+    for c in result.get("clips", []):  # cada original seguido de sus versiones nuevas, para compararlas
+        items.append(_item(job_dir, result, transcript, c, "clip", settings, with_sync, by_rank))
+        for tag, clips in variants.items():
+            v = next((x for x in clips if x["name"] == c["name"]), None)
+            if v:
+                items.append(_item(job_dir, result, transcript, v, "clip", settings, with_sync, by_rank,
+                                   out_name=f"out_{tag}", variant=tag))
     items += [_item(job_dir, result, transcript, c, "alt", settings, with_sync, by_rank) for c in result.get("alt_clips", [])]
     for alt in alternatives_for(result, n_alternatives, settings):
         entry = {"name": f"cand_{alt.rank:02d}", "rank": alt.rank, "start": round(alt.start, 2), "end": round(alt.end, 2),
