@@ -241,6 +241,44 @@ def test_old_format_job_without_whisper_stats_still_rescores(result, tmp_path):
     assert "Evidencia de Whisper:** no disponible" in (Path(res["job_dir"]) / "report.md").read_text(encoding="utf-8")
 
 
+def test_validation_session_end_to_end(sample, tmp_path):
+    """Sesión completa: job + alternativos + informe por clip + elementos de revisión con sincronía estimada."""
+    from streamclipper.review import ReviewStore, coverage_against_reviews
+    from streamclipper.review_server import load_state
+    from streamclipper.session import resolve_review_target, run_session
+
+    s = Settings(data_dir=tmp_path)
+    meta = run_session(str(sample), ["base"], s, label="demo", language="en", n_alternatives=10)
+    sdir = Path(meta["session_dir"])
+    assert [j["status"] for j in meta["jobs"]] == ["completed"] and meta["compare"] is None
+    assert json.loads((sdir / "session.json").read_text(encoding="utf-8"))["fingerprint"]
+    job_dir = Path(meta["jobs"][0]["job_dir"])
+    assert (job_dir / "alternatives.md").is_file() and (job_dir / "alternatives.json").is_file()
+    report = (sdir / "report.md").read_text(encoding="utf-8")
+    assert "Clips elegidos" in report and "Confianza de transcripción" in report and "No** califica" in report
+    assert "entretenid" not in report.replace("como entretenido", "")   # el informe no califica clips
+
+    state = load_state(resolve_review_target(["demo"], s), s, 10, with_sync=True)
+    clips = [i for i in state.items if i["kind"] == "clip"]
+    assert len(clips) == 2
+    for c in clips:
+        assert c["media_exists"] and c["validation_ok"] and c["transcript"] and c["confidence"]["whisper_stats_available"]
+        sub = c["subtitles"]
+        assert sub["available"] and sub["lines"] > 0 and sub["sync"]["available"]
+        assert abs(sub["sync"]["lag_s"]) <= 0.5, sub["sync"]   # voz sintética limpia: sin desfase relevante
+        assert c["audio"]["anchor_in_clip_s"] is not None and c["components"]
+    # la evaluación humana se guarda por video y sirve para comparar versiones
+    state.store.set(clips[0], "good", "bien", state.jobs[0]["algorithm"])
+    state.store.set(clips[1], "edit", "recortar", state.jobs[0]["algorithm"])
+    reloaded = ReviewStore(state.store.path)
+    cov = coverage_against_reviews(state.jobs[0]["result"], reloaded)
+    assert cov["selected_by_rating"] == {"good": 1, "edit": 1, "bad": 0, "unrated": 0}
+    assert cov["good_or_edit_selected"] == 2
+    from streamclipper.core.errors import InvalidInputError
+    with pytest.raises(InvalidInputError, match="Ya existe la sesión"):
+        run_session(str(sample), ["base"], s, label="demo", language="en")
+
+
 def test_cancelled_job_leaves_no_temp_files_or_partial_outputs(sample, tmp_path):
     token = CancelToken()
     token.cancel()

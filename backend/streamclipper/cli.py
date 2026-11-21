@@ -9,7 +9,11 @@ from streamclipper.core.config import Settings
 from streamclipper.core.errors import StreamClipperError
 from streamclipper.evaluation import evaluate_jobs
 from streamclipper.export import export_alternatives
+from streamclipper.jobs import load_result
 from streamclipper.rescore import rescore_job
+from streamclipper.review import ReviewStore, coverage_against_reviews, write_alternatives
+from streamclipper.review_server import load_state, serve
+from streamclipper.session import resolve_review_target, run_session
 from streamclipper.jobs import resolve_job
 from streamclipper.media.download import DownloadLimits, download_youtube, looks_like_url
 from streamclipper.media.ffmpeg import probe
@@ -59,6 +63,29 @@ def _build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--crop-x", type=float, default=None)
     ex.add_argument("--crop-y", type=float, default=None)
     ex.add_argument("--zoom", type=float, default=None)
+
+    se = sub.add_parser("session", help="Validación: procesa un video (URL o MP4) con varios modelos y prepara la revisión")
+    se.add_argument("input", help="URL HTTPS de YouTube o ruta a un MP4")
+    se.add_argument("--models", default="base,small", help="Modelos Whisper separados por coma (defecto base,small)")
+    se.add_argument("--label", default=None, help="Nombre de la sesión (defecto: nombre del archivo)")
+    se.add_argument("--language", default=None, help="Idioma hablado (es, en); por defecto autodetecta")
+    se.add_argument("--alternatives", type=int, default=10, help="Candidatos alternativos a listar por modelo")
+    se.add_argument("--threads", type=int, default=4)
+    _add_download_args(se)
+
+    rv = sub.add_parser("review", help="Abre la herramienta local para evaluar clips (bueno / edición / no sirve)")
+    rv.add_argument("target", nargs="+", help="Nombre de sesión, o ids/fragmentos de uno o más jobs del mismo video")
+    rv.add_argument("--port", type=int, default=8765)
+    rv.add_argument("--no-open", action="store_true", help="No abrir el navegador automáticamente")
+    rv.add_argument("--alternatives", type=int, default=10, help="Candidatos sin renderizar a incluir por job")
+    rv.add_argument("--no-sync", action="store_true", help="Omitir la estimación de sincronía de subtítulos (más rápido)")
+
+    al = sub.add_parser("alternatives", help="Escribe la lista de candidatos alternativos de un job (alternatives.md/json)")
+    al.add_argument("job")
+    al.add_argument("--n", type=int, default=10)
+
+    rr = sub.add_parser("reviews", help="Resume las evaluaciones humanas y cómo se ubica un job frente a ellas")
+    rr.add_argument("jobs", nargs="+")
 
     rs = sub.add_parser("rescore", help="Re-puntúa un job con el algoritmo actual, sin retranscribir ni descargar")
     rs.add_argument("job", help="Id (o fragmento) del job, o ruta a su carpeta")
@@ -167,6 +194,64 @@ def main(argv: list[str] | None = None) -> int:
                 print("Cancelado.", file=sys.stderr)
                 return 130
             _print_download(res)
+            return 0
+
+        if args.cmd == "session":
+            cancel = CancelToken()
+            try:
+                meta = run_session(args.input, [m.strip() for m in args.models.split(",") if m.strip()], Settings(),
+                                   label=args.label, limits=_limits(args), n_alternatives=args.alternatives,
+                                   cancel=cancel, progress=lambda m: print(m, file=sys.stderr),
+                                   language=args.language)
+            except KeyboardInterrupt:
+                cancel.cancel()
+                print("Cancelado.", file=sys.stderr)
+                return 130
+            print(f"\nSesión '{meta['label']}' lista en {meta['session_dir']}")
+            for j in meta["jobs"]:
+                print(f"  Whisper {j['model']}: {j['status']}" + (f" — {j['error']}" if j["error"] else "")
+                      + f"  ({j['job_dir']})")
+            print(f"Informe por clip: {meta['session_dir']}\\report.md"
+                  + (f"\nComparación: {meta['compare']}" if meta["compare"] else ""))
+            print(f"\nPara revisar y evaluar los clips:\n  streamclipper review {meta['label']}")
+            return 0 if all(j["status"] == "completed" for j in meta["jobs"]) else 1
+
+        if args.cmd == "review":
+            s = Settings()
+            dirs = resolve_review_target(args.target, s)
+            if not dirs:
+                print("Error: la sesión no tiene jobs completados", file=sys.stderr)
+                return 2
+            print("Preparando elementos de revisión (estimando sincronía de subtítulos)…", file=sys.stderr)
+            serve(load_state(dirs, s, args.alternatives, with_sync=not args.no_sync), args.port, not args.no_open)
+            return 0
+
+        if args.cmd == "alternatives":
+            s = Settings()
+            d = resolve_job(args.job, s)
+            items = write_alternatives(d, s, args.n)
+            print(f"{len(items)} candidatos alternativos escritos en {d}\\alternatives.md y alternatives.json")
+            return 0
+
+        if args.cmd == "reviews":
+            s = Settings()
+            for ref in args.jobs:
+                d = resolve_job(ref, s)
+                res = load_result(d)
+                store = ReviewStore.for_source(s, res.get("source_fingerprint", ""), res["source"])
+                cov = coverage_against_reviews(res, store)
+                counts = store.summary()
+                print(f"\n{d.name}  (evaluaciones del video: {counts['good']} bueno, {counts['edit']} edición, "
+                      f"{counts['bad']} no sirve; {cov['rated_moments']} momentos, {cov['conflicts']} con discrepancias)")
+                sel = cov["selected_by_rating"]
+                print(f"  Clips elegidos: {sel['good']} bueno, {sel['edit']} edición, {sel['bad']} no sirve, "
+                      f"{sel['unrated']} sin evaluar")
+                print(f"  Momentos buenos/edición cubiertos por los elegidos: {cov['good_or_edit_selected']}"
+                      f"/{len(cov['good_or_edit_moments'])}")
+                for w in cov["good_or_edit_moments"]:
+                    print(f"    {w['start']}–{w['end']}s ({w['rating']}): "
+                          + ("elegido" if w["selected"] else f"candidato #{w['candidate_rank']}" if w["candidate_rank"]
+                             else "ningún candidato"))
             return 0
 
         if args.cmd == "rescore":
