@@ -81,6 +81,7 @@ def run_pipeline(
     scorer: CandidateScorer | None = None,
     keep_temp: bool = False,
     label: str | None = None,
+    on_job_dir: Callable[[str, Path], None] | None = None,
 ) -> dict:
     cancel = cancel or CancelToken()
     progress = progress or (lambda *_: None)
@@ -92,6 +93,8 @@ def run_pipeline(
     out_dir.mkdir(parents=True)
     work.mkdir()
     setup_logging(job_dir / "job.log")
+    if on_job_dir:
+        on_job_dir(job_id, job_dir)   # permite enlazar el trabajo con su carpeta desde el primer momento
 
     warnings: list[str] = []
     result: dict = {

@@ -1,10 +1,15 @@
 # StreamClipper
 
 Detecta momentos destacados en videos de streams y los exporta como clips verticales (1080×1920, H.264 + AAC) con subtítulos.
-Todo corre en local, sobre CPU. Uso personal. **Estado: pipeline CLI (Etapa 2). Todavía no hay interfaz web ni API.**
+Todo corre en local, sobre CPU. Uso personal. **Estado: MVP 1.0 con aplicación local (sin comandos): ver [docs/app.md](docs/app.md).**
 La calidad de selección con gameplay real **aún no está validada**: ver [docs/real-video-test.md](docs/real-video-test.md).
 
-## Instalación (Windows 11)
+## Inicio rápido (Windows 11)
+
+Doble clic en `instalar.bat` (una vez) y luego en `iniciar_streamclipper.bat`; se abre la aplicación en el navegador.
+Guía completa: [docs/app.md](docs/app.md). Lo siguiente es la instalación manual y la CLI.
+
+## Instalación manual
 
 Requisitos: Python 3.11+ y el build portable de FFmpeg de <https://www.gyan.dev/ffmpeg/builds/> (`ffmpeg-release-essentials`).
 

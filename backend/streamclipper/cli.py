@@ -68,6 +68,12 @@ def _build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--crop-y", type=float, default=None)
     ex.add_argument("--zoom", type=float, default=None)
 
+    ap = sub.add_parser("app", help="Abre la aplicación web local de StreamClipper (solo en 127.0.0.1)")
+    ap.add_argument("--port", type=int, default=8780)
+    ap.add_argument("--no-open", action="store_true", help="No abrir el navegador automáticamente")
+
+    sub.add_parser("doctor", help="Comprueba que FFmpeg, yt-dlp, Whisper y el resto de requisitos estén listos")
+
     se = sub.add_parser("session", help="Validación: procesa un video (URL o MP4) con varios modelos y prepara la revisión")
     se.add_argument("input", help="URL HTTPS de YouTube o ruta a un MP4")
     se.add_argument("--models", default="base,small", help="Modelos Whisper separados por coma (defecto base,small)")
@@ -244,6 +250,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "probe":
             print(json.dumps(vars(probe(resolve_input(args.input), Settings().ffprobe)), indent=2))
             return 0
+
+        if args.cmd == "app":
+            from streamclipper.app.server import serve_app
+            serve_app(Settings(), args.port, not args.no_open)
+            return 0
+
+        if args.cmd == "doctor":
+            from streamclipper.doctor import run_doctor
+            res = run_doctor(Settings())
+            for c in res["checks"]:
+                print(f"  [{ {'ok': ' OK ', 'warn': 'AVISO', 'error': 'FALTA'}[c['level']] }] {c['label']}: {c['detail']}")
+            print("\nTodo listo." if res["ok"] else "\nHay requisitos por resolver (ver arriba).")
+            return 0 if res["ok"] else 1
 
         if args.cmd == "download":
             cancel = CancelToken()

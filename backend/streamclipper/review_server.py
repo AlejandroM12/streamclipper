@@ -17,9 +17,9 @@ from streamclipper.core.config import Settings
 from streamclipper.core.errors import InvalidInputError
 from streamclipper.jobs import load_result
 from streamclipper.review import RATINGS, ReviewStore, algorithm_info, build_items
+from streamclipper.webutil import TYPES as _TYPES  # noqa: F401  (se conserva el nombre por compatibilidad)
+from streamclipper.webutil import host_ok, send_file, send_json
 
-_TYPES = {".mp4": "video/mp4", ".webm": "video/webm", ".mkv": "video/x-matroska", ".mov": "video/quicktime",
-          ".ass": "text/plain; charset=utf-8"}
 _MAX_BODY = 20_000
 
 
@@ -59,64 +59,18 @@ def make_server(state: ReviewState, host: str = "127.0.0.1", port: int = 8765) -
         def log_message(self, *a):  # silencioso
             pass
 
-        # --- utilidades ---
+        # --- utilidades (compartidas con la aplicación: streamclipper/webutil.py) ---
         def _host_ok(self) -> bool:
-            h = (self.headers.get("Host") or "").lower()
-            return h in (f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}")
+            return host_ok(self)
 
         def _json(self, obj, status=200):
-            body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+            send_json(self, obj, status)
 
         def _error(self, status: int, msg: str):
             self._json({"error": msg}, status)
 
         def _file(self, path: Path):
-            size = path.stat().st_size
-            start, end, status = 0, size - 1, 200
-            rng = self.headers.get("Range")
-            if rng and size:
-                m = re.fullmatch(r"bytes=(\d*)-(\d*)", rng.strip())
-                if not m or not (m.group(1) or m.group(2)):
-                    return self._range_error(size)
-                if m.group(1) == "":
-                    start = max(0, size - int(m.group(2)))
-                else:
-                    start = int(m.group(1))
-                    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
-                if start > end or start >= size:
-                    return self._range_error(size)
-                status = 206
-            self.send_response(status)
-            self.send_header("Content-Type", _TYPES.get(path.suffix.lower(), "application/octet-stream"))
-            self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Content-Length", str(max(0, end - start + 1)))
-            if status == 206:
-                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-            self.end_headers()
-            try:
-                with path.open("rb") as f:
-                    f.seek(start)
-                    remaining = end - start + 1
-                    while remaining > 0:
-                        chunk = f.read(min(1 << 20, remaining))
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        remaining -= len(chunk)
-            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-                pass  # el navegador cerró la conexión (adelantó el video)
-
-        def _range_error(self, size: int):
-            self.send_response(416)
-            self.send_header("Content-Range", f"bytes */{size}")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+            send_file(self, path)
 
         # --- rutas ---
         def do_GET(self):

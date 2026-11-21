@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamClipper</title>
+<style>
+:root{--bg:#f4f6f9;--card:#fff;--fg:#1b2230;--mut:#5d6879;--line:#d8dee8;--acc:#2f6fed;--accfg:#fff;--good:#1f8a4c;--edit:#b7791f;--bad:#c0392b;--warn:#8a5a00;--ok:#1f8a4c}
+@media (prefers-color-scheme:dark){:root{--bg:#11141a;--card:#1a1f28;--fg:#e8ecf3;--mut:#9aa6b8;--line:#2c3443;--acc:#7da5ff;--accfg:#0d1220;--good:#4cc582;--edit:#e0a93c;--bad:#ef6b5b;--warn:#e0b45a;--ok:#4cc582}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,"Segoe UI",sans-serif}
+header{position:sticky;top:0;z-index:20;background:var(--card);border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;padding:10px 18px;flex-wrap:wrap}
+header h1{font-size:18px;margin:0 8px 0 0}nav{display:flex;gap:6px;flex-wrap:wrap}
+nav a{padding:6px 12px;border-radius:8px;color:var(--fg);text-decoration:none;border:1px solid transparent}nav a.on{border-color:var(--acc);color:var(--acc);font-weight:600}
+.pill{margin-left:auto;font-size:12px;color:var(--mut)}
+main{max-width:1180px;margin:0 auto;padding:18px;display:grid;gap:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+h2{font-size:16px;margin:0 0 10px}h3{font-size:14px;margin:12px 0 6px}
+label{display:block;font-size:13px;color:var(--mut);margin:8px 0 3px}
+input,select,textarea,button{font:inherit;color:inherit}
+input,select,textarea{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:7px 9px}
+textarea{min-height:44px;resize:vertical}
+button{border:1px solid var(--line);background:var(--bg);border-radius:8px;padding:7px 13px;cursor:pointer}
+button:hover{border-color:var(--acc)}button:disabled{opacity:.5;cursor:default}
+button.primary{background:var(--acc);color:var(--accfg);border-color:var(--acc);font-weight:600}
+button.danger{border-color:var(--bad);color:var(--bad)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:end}.row>*{flex:1 1 160px}.row>.fix{flex:0 0 auto}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}.seg button{border:0;border-radius:0}.seg button.on{background:var(--acc);color:var(--accfg)}
+.mut{color:var(--mut)}.small{font-size:12px}.warn{color:var(--warn)}.err{color:var(--bad)}.ok{color:var(--ok)}
+.badge{display:inline-block;padding:1px 9px;border-radius:999px;font-size:12px;border:1px solid var(--line)}
+.badge.running{border-color:var(--acc);color:var(--acc)}.badge.completed{border-color:var(--ok);color:var(--ok)}.badge.failed,.badge.interrupted{border-color:var(--bad);color:var(--bad)}.badge.cancelled{color:var(--mut)}
+.job{border:1px solid var(--line);border-radius:10px;padding:12px;margin-top:10px}
+.job h3{margin:0 0 4px}.stages{margin:8px 0;display:grid;gap:3px}
+.stage{display:grid;grid-template-columns:22px 1fr auto;gap:8px;align-items:center;font-size:13px}
+.bar{height:6px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:3px}.bar>i{display:block;height:100%;background:var(--acc)}
+.box{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0;font-size:13px}.box.err{border-color:var(--bad)}.box.warn{border-color:var(--warn)}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+.sess{cursor:pointer}.sess:hover{border-color:var(--acc)}.sess.legacy{opacity:.55;cursor:default}
+.clip{display:grid;grid-template-columns:minmax(220px,300px) 1fr;gap:16px}@media (max-width:760px){.clip{grid-template-columns:1fr}}
+video{width:100%;max-height:68vh;background:#000;border-radius:8px}
+.rate{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}.rate button.on.good{border-color:var(--good);color:var(--good);font-weight:600}.rate button.on.edit{border-color:var(--edit);color:var(--edit);font-weight:600}.rate button.on.bad{border-color:var(--bad);color:var(--bad);font-weight:600}
+details{margin:6px 0}summary{cursor:pointer;color:var(--acc)}.tx{white-space:pre-wrap;background:var(--bg);border-radius:8px;padding:8px;font-size:14px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;display:flex;align-items:flex-start;justify-content:center;overflow:auto;padding:24px 12px}
+.dlg{background:var(--card);border:1px solid var(--line);border-radius:14px;max-width:980px;width:100%;padding:18px}
+.cuerow{display:grid;grid-template-columns:64px 64px 1fr auto;gap:6px;align-items:start;margin:4px 0}.cuerow input{padding:4px 6px}
+.cuerow.low textarea{border-color:var(--warn)}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:9px 16px;border-radius:10px;z-index:99;max-width:90vw}
+</style>
+</head>
+<body>
+<header>
+  <h1>StreamClipper</h1>
+  <nav id="nav"></nav>
+  <span class="pill" id="pill"></span>
+</header>
+<main id="view"></main>
+<script>
+"use strict";
+/* Todo el contenido dinámico se inserta con textContent/createTextNode: los títulos y transcripciones son datos de terceros. */
+const $ = (s, r = document) => r.querySelector(s);
+function el(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (k === "value") e.value = v;
+    else e.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat()) { if (c == null || c === false) continue; e.append(c instanceof Node ? c : document.createTextNode(String(c))); }
+  return e;
+}
+async function api(url, body, method) {
+  const opts = body === undefined ? {} : { method: method || "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(url, opts);
+  let data = {};
+  try { data = await r.json(); } catch (e) { /* respuesta sin JSON */ }
+  if (!r.ok) { const err = new Error(data.error || ("Error " + r.status)); err.data = data; err.status = r.status; throw err; }
+  return data;
+}
+function toast(msg, ms) { const t = el("div", { class: "toast" }, msg); document.body.append(t); setTimeout(() => t.remove(), ms || 3500); }
+const mm = (s) => { s = Math.max(0, s || 0); return Math.floor(s / 60) + ":" + (s % 60).toFixed(1).padStart(4, "0"); };
+const fdate = (t) => new Date(t * 1000).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" });
+const mediaUrl = (sess, rel) => "/media/" + encodeURIComponent(sess) + "/" + rel.split("/").map(encodeURIComponent).join("/");
+const STATUS = { queued: "En cola", running: "En curso", completed: "Listo", failed: "Falló", cancelled: "Cancelado", interrupted: "Interrumpido" };
+const ICON = { pending: "○", running: "◔", done: "✓", failed: "✗", cancelled: "⊘" };
+
+let CONFIG = null, JOBS = [], pollTimer = null, currentView = null;
+
+/* ---------- navegación ---------- */
+const NAV = [["#/", "Nuevo"], ["#/sesiones", "Sesiones"], ["#/estado", "Estado del sistema"]];
+function renderNav() {
+  const h = location.hash || "#/";
+  const nav = $("#nav"); nav.replaceChildren(...NAV.map(([href, label]) => el("a", { href, class: (h === href || (href === "#/sesiones" && h.startsWith("#/sesion/"))) ? "on" : "" }, label)));
+}
+window.addEventListener("hashchange", route);
+async function route() {
+  renderNav();
+  const h = location.hash || "#/";
+  const view = $("#view");
+  currentView = h;
+  try {
+    if (h === "#/") await viewNew(view);
+    else if (h === "#/sesiones") await viewSessions(view);
+    else if (h === "#/estado") await viewDoctor(view);
+    else if (h.startsWith("#/sesion/")) await viewSession(view, decodeURIComponent(h.slice(9)));
+    else view.replaceChildren(el("div", { class: "card" }, "Página no encontrada."));
+  } catch (e) { view.replaceChildren(el("div", { class: "card err" }, "No se pudo cargar: " + e.message)); }
+}
+
+/* ---------- trabajos (compartido) ---------- */
+function stageRow(s) {
+  const running = s.status === "running";
+  let right = "";
+  if (s.status === "done" && s.seconds != null) right = s.seconds + " s";
+  if (running && s.started) right = Math.max(0, Math.round(Date.now() / 1000 - s.started)) + " s";
+  const main = el("div", {}, el("span", {}, s.label), s.detail ? el("span", { class: "mut small" }, "  " + s.detail) : null);
+  if (running && s.fraction != null) main.append(el("div", { class: "bar" }, el("i", { style: "width:" + Math.round(s.fraction * 100) + "%" })));
+  return el("div", { class: "stage" }, el("span", { class: s.status === "done" ? "ok" : s.status === "failed" ? "err" : "" }, ICON[s.status] || "○"), main,
+    el("span", { class: "mut small" }, right));
+}
+function jobCard(j) {
+  const active = j.status === "queued" || j.status === "running";
+  const box = el("div", { class: "job" },
+    el("h3", {}, j.title || j.id, "  ", el("span", { class: "badge " + j.status }, STATUS[j.status] || j.status),
+      j.status === "queued" && j.queue_position ? el("span", { class: "mut small" }, "  posición " + j.queue_position + " en la cola") : null),
+    el("div", { class: "mut small" }, (j.kind === "edit" ? "Edición · " : "Procesamiento · ") + fdate(j.created_at) + (j.params && j.params.model ? " · Whisper " + j.params.model : "")),
+    el("div", { class: "stages" }, j.stages.map(stageRow)));
+  if (j.message && active) box.append(el("div", { class: "mut small" }, j.message));
+  for (const w of (j.warnings || []).slice(0, 4)) box.append(el("div", { class: "box warn" }, "⚠ " + w));
+  if (j.error) {
+    const b = el("div", { class: "box err" }, el("strong", {}, "No se pudo completar: "), j.error);
+    if (j.hint) b.append(el("div", { class: "mut" }, "Sugerencia: " + j.hint));
+    box.append(b);
+  }
+  const acts = el("div", { class: "row" });
+  if (active) acts.append(el("button", { class: "danger fix", onclick: async () => { try { await api("/api/jobs/" + j.id + "/cancel", {}); loadJobs(); } catch (e) { toast(e.message); } } }, "Cancelar"));
+  if (["failed", "cancelled", "interrupted"].includes(j.status)) acts.append(el("button", { class: "fix", onclick: async () => { try { await api("/api/jobs/" + j.id + "/retry", {}); loadJobs(); } catch (e) { toast(e.message); } } }, "Reintentar"));
+  if (j.session && ["completed", "failed", "cancelled", "interrupted"].includes(j.status) && j.kind === "process")
+    acts.append(el("a", { href: "#/sesion/" + encodeURIComponent(j.session) }, el("button", { class: "primary fix" }, j.status === "completed" ? "Abrir clips" : "Ver sesión")));
+  if (acts.children.length) box.append(acts);
+  return box;
+}
+async function loadJobs() {
+  try { JOBS = (await api("/api/jobs")).jobs; } catch (e) { return; }
+  const box = $("#jobs");
+  if (box) {
+    const list = JOBS.filter((j) => j.kind === "process").slice(0, 6);
+    box.replaceChildren(...(list.length ? list.map(jobCard) : [el("div", { class: "mut" }, "Todavía no procesaste ningún video en esta aplicación.")]));
+  }
+  const n = JOBS.filter((j) => j.status === "queued" || j.status === "running").length;
+  $("#pill").textContent = n ? n + " trabajo(s) activo(s)" : "";
+  schedulePoll(n > 0);
+  document.dispatchEvent(new CustomEvent("jobs", { detail: JOBS }));
+}
+function schedulePoll(fast) { clearTimeout(pollTimer); pollTimer = setTimeout(loadJobs, fast ? 1200 : 6000); }
+
+/* ---------- vista: nuevo ---------- */
+async function viewNew(view) {
+  if (!CONFIG) CONFIG = await api("/api/config");
+  const D = CONFIG.defaults;
+  let kind = "url";
+  const url = el("input", { type: "text", placeholder: "https://www.youtube.com/watch?v=…", autocomplete: "off" });
+  const path = el("input", { type: "text", placeholder: "C:\\ruta\\al\\video.mp4" });
+  const samples = el("select", {}), lang = el("select", {}), model = el("select", {}), layout = el("select", {}), platform = el("select", {});
+  const clips = el("input", { type: "number", min: 1, max: 6, value: D.max_clips });
+  for (const l of CONFIG.languages) lang.append(el("option", { value: l, selected: l === D.language }, { es: "Español", en: "Inglés", auto: "Detectar automáticamente" }[l] || l));
+  for (const m of CONFIG.models) model.append(el("option", { value: m.id, selected: m.id === D.model }, m.label + (m.cached ? "" : " — se descarga la primera vez")));
+  layout.append(el("option", { value: "blur-fit" }, "Seguro: cuadro completo con fondo desenfocado"), el("option", { value: "focus" }, "Gameplay más grande (recorta los costados)"));
+  for (const p of CONFIG.platforms) platform.append(el("option", { value: p }, p === "universal" ? "Universal (TikTok, Reels y Shorts)" : p));
+  const urlBox = el("div", {}, el("label", {}, "URL de YouTube"), url,
+    el("div", { class: "mut small" }, "Solo videos públicos (hasta " + CONFIG.youtube_limits.max_minutes + " min y " + CONFIG.youtube_limits.max_mb + " MB). Usá contenido propio o con autorización."));
+  const fileBox = el("div", { style: "display:none" }, el("label", {}, "Archivo de video (MP4, MKV, MOV o WEBM)"),
+    el("div", { class: "row" }, path, el("button", { class: "fix", type: "button", onclick: async (ev) => {
+      ev.target.disabled = true; ev.target.textContent = "Esperando el selector…";
+      try { const r = await api("/api/pick-file", {}); if (r.path) path.value = r.path; } catch (e) { toast(e.message); }
+      ev.target.disabled = false; ev.target.textContent = "Examinar…";
+    } }, "Examinar…")), samples);
+  api("/api/samples").then((s) => {
+    samples.append(el("option", { value: "" }, s.files.length ? "…o elegí un video ya disponible en " + s.folder : "No hay videos en " + s.folder));
+    for (const f of s.files) samples.append(el("option", { value: f.path }, f.name + " (" + f.mb + " MB)"));
+  }).catch(() => {});
+  samples.addEventListener("change", () => { if (samples.value) path.value = samples.value; });
+  const segBtns = [["url", "URL de YouTube"], ["file", "Archivo local"]].map(([k, label]) => el("button", { type: "button", class: k === "url" ? "on" : "", onclick: () => {
+    kind = k; urlBox.style.display = k === "url" ? "" : "none"; fileBox.style.display = k === "file" ? "" : "none";
+    segBtns.forEach((b, i) => b.classList.toggle("on", ["url", "file"][i] === k));
+  } }, label));
+  const go = el("button", { class: "primary", type: "button" }, "Procesar");
+  async function submit(force) {
+    go.disabled = true;
+    const params = { model: model.value, language: lang.value, layout: layout.value, max_clips: Number(clips.value), platform: platform.value };
+    try {
+      await api("/api/jobs", { source: kind === "url" ? url.value : path.value, params, force: !!force });
+      toast("Trabajo agregado. El progreso aparece abajo.");
+      loadJobs();
+    } catch (e) {
+      if (e.status === 409 && e.data.duplicate === "completed") {
+        const dlg = el("div", { class: "box warn" }, e.message + " ",
+          el("a", { href: "#/sesion/" + encodeURIComponent(e.data.existing_session) }, el("button", { type: "button" }, "Abrir la sesión existente")), " ",
+          el("button", { type: "button", onclick: () => { dlg.remove(); submit(true); } }, "Reprocesar igual"));
+        $("#formmsg").replaceChildren(dlg);
+      } else $("#formmsg").replaceChildren(el("div", { class: "box err" }, e.message));
+    }
+    go.disabled = false;
+  }
+  go.addEventListener("click", () => { $("#formmsg").replaceChildren(); submit(false); });
+  view.replaceChildren(
+    el("div", { class: "card" }, el("h2", {}, "Nuevo video"), el("div", { class: "seg" }, segBtns), urlBox, fileBox,
+      el("div", { class: "row" }, el("div", {}, el("label", {}, "Idioma hablado"), lang), el("div", {}, el("label", {}, "Modelo Whisper"), model),
+        el("div", {}, el("label", {}, "Cantidad de clips"), clips), el("div", {}, el("label", {}, "Presentación"), layout)),
+      el("details", {}, el("summary", {}, "Opciones avanzadas"), el("label", {}, "Márgenes seguros de la plataforma"), platform),
+      el("div", { id: "formmsg" }), el("div", { class: "row", style: "margin-top:12px" }, go)),
+    el("div", { class: "card" }, el("h2", {}, "Trabajos"), el("div", { id: "jobs" })));
+  loadJobs();
+}
+
+/* ---------- vista: sesiones ---------- */
+async function viewSessions(view) {
+  const { sessions } = await api("/api/sessions");
+  const filter = el("input", { type: "text", placeholder: "Filtrar por título o modelo…" });
+  const grid = el("div", { class: "grid" });
+  const draw = () => {
+    const q = filter.value.toLowerCase();
+    const items = sessions.filter((s) => !q || (s.title + " " + (s.model || "") + " " + s.id).toLowerCase().includes(q));
+    grid.replaceChildren(...(items.length ? items.map((s) => el("div", { class: "card sess" + (s.legacy ? " legacy" : ""), title: s.legacy ? "Sesión de una versión muy antigua: no se puede abrir" : "",
+      onclick: () => { if (!s.legacy) location.hash = "#/sesion/" + encodeURIComponent(s.id); } },
+      el("strong", {}, s.title), el("div", { class: "mut small" }, fdate(s.created) + " · Whisper " + (s.model || "?") + (s.language ? " · " + s.language : "")),
+      el("div", { style: "margin-top:6px" }, el("span", { class: "badge " + s.status }, STATUS[s.status] || s.status), " ",
+        el("span", {}, s.clips + " clip(s)"), s.variants.length ? el("span", { class: "mut small" }, " · versiones: " + s.variants.join(", ")) : null,
+        s.edits ? el("span", { class: "mut small" }, " · " + s.edits + " edición(es)") : null),
+      s.error ? el("div", { class: "err small" }, s.error) : null)) : [el("div", { class: "mut" }, "No hay sesiones todavía.")]));
+  };
+  filter.addEventListener("input", draw);
+  view.replaceChildren(el("div", { class: "card" }, el("h2", {}, "Sesiones anteriores"), filter), grid);
+  draw();
+}
+
+/* ---------- vista: estado del sistema ---------- */
+async function viewDoctor(view) {
+  const d = await api("/api/doctor");
+  view.replaceChildren(el("div", { class: "card" }, el("h2", {}, d.ok ? "Todo listo para funcionar" : "Hay problemas por resolver"),
+    ...d.checks.map((c) => el("div", { class: "stage", style: "grid-template-columns:22px 260px 1fr" },
+      el("span", { class: c.level === "ok" ? "ok" : c.level === "warn" ? "warn" : "err" }, c.level === "ok" ? "✓" : c.level === "warn" ? "!" : "✗"), el("strong", {}, c.label), el("span", { class: "mut small" }, c.detail))),
+    el("div", { class: "mut small", style: "margin-top:10px" }, "Datos en: " + (CONFIG ? CONFIG.data_dir : ""))));
+}
+
+/* ---------- vista: sesión (galería) ---------- */
+async function viewSession(view, id) {
+  if (!CONFIG) CONFIG = await api("/api/config");
+  const D = await api("/api/sessions/" + encodeURIComponent(id));
+  const sel = new Set();            // "clip|version" marcadas para exportar
+  const chosen = {};                // clip -> versión mostrada
+  const out = el("div", { id: "exportout" });
+  const sess = D.session;
+  const head = el("div", { class: "card" }, el("h2", {}, sess.title),
+    el("div", { class: "mut small" }, fdate(sess.created) + " · Whisper " + sess.model + " · " + sess.clips + " clip(s) · " + (sess.video_seconds ? Math.round(sess.video_seconds / 60 * 10) / 10 + " min de video" : "")),
+    el("div", { class: "mut small" }, sess.source),
+    D.warnings.length ? el("details", {}, el("summary", {}, D.warnings.length + " aviso(s) del procesamiento"), ...D.warnings.slice(0, 20).map((w) => el("div", { class: "small warn" }, "⚠ " + w))) : null,
+    el("div", { class: "row", style: "margin-top:10px" },
+      el("button", { class: "primary fix", onclick: doExport }, "Exportar los clips marcados (MP4 + SRT)"),
+      el("span", { class: "mut small" }, "Marcá «Exportar» en cada clip. Se copian a la carpeta de exportación sin tocar los originales.")), out);
+  async function doExport() {
+    const selections = [...sel].map((k) => { const [clip, version] = k.split("|"); return { clip, version }; });
+    if (!selections.length) { toast("Marcá al menos un clip para exportar."); return; }
+    try {
+      const r = await api("/api/sessions/" + encodeURIComponent(id) + "/export", { selections });
+      out.replaceChildren(el("div", { class: "box" }, el("strong", {}, "Exportado en: "), r.folder, " ",
+        el("button", { onclick: () => api("/api/open-folder", { path: r.folder }).catch((e) => toast(e.message)) }, "Abrir carpeta"),
+        ...r.files.map((f) => el("div", { class: "small mut" }, f.mp4 + "  ·  " + f.srt))));
+    } catch (e) { out.replaceChildren(el("div", { class: "box err" }, e.message)); }
+  }
+  const list = el("div", { style: "display:grid;gap:14px" });
+  function clipCard(c) {
+    const latest = c.versions[c.versions.length - 1];
+    const vsel = el("select", {}, c.versions.map((v) => el("option", { value: v.id }, v.label + " · " + v.duration + " s")));
+    vsel.value = chosen[c.name] || latest.id; chosen[c.name] = vsel.value;
+    const holder = el("div", { class: "clip" });
+    const draw = () => {
+      const v = c.versions.find((x) => x.id === vsel.value); chosen[c.name] = v.id;
+      const rid = v.rating_id, rt = D.ratings[rid] || {};
+      const video = v.media_exists === false ? el("div", { class: "box err" }, "Este archivo ya no existe.") : el("video", { controls: true, preload: "metadata", src: mediaUrl(id, v.media) });
+      const note = el("textarea", { placeholder: "Notas (opcional)" }); note.value = rt.note || "";
+      const rate = (r) => async () => {
+        try { const res = await api("/api/sessions/" + encodeURIComponent(id) + "/rating", { clip: c.name, version: v.id, rating: r, note: note.value });
+          if (res.rating) D.ratings[rid] = res.rating; else delete D.ratings[rid]; draw(); } catch (e) { toast(e.message); }
+      };
+      const dl = (ext) => "/download/" + encodeURIComponent(id) + "/" + c.name + "/" + v.id + "/" + ext;
+      const key = c.name + "|" + v.id;
+      const conf = c.confidence;
+      holder.replaceChildren(el("div", {}, video),
+        el("div", {}, el("h3", { style: "margin-top:0" }, c.name + " · momento #" + c.rank, el("span", { class: "mut small" }, "  puntuación " + c.score + " (ranking heurístico, no una predicción)")),
+          el("div", { class: "mut small" }, "Tramo del video: " + mm(v.start) + " – " + mm(v.end) + " (" + v.duration + " s) · " + v.label),
+          el("div", { class: "rate" }, ...Object.entries(D.labels).map(([k, label]) => el("button", { class: k + (rt.rating === k ? " on" : ""), onclick: rate(rt.rating === k ? null : k) }, label))),
+          note,
+          el("div", { class: "row", style: "margin-top:8px" },
+            el("button", { class: "fix", onclick: () => openEditor(D, c, v, () => viewSession($("#view"), id)) }, "Editar inicio, final y subtítulos"),
+            el("a", { href: dl("mp4"), class: "fix" }, el("button", { type: "button" }, "Descargar MP4")), el("a", { href: dl("srt"), class: "fix" }, el("button", { type: "button" }, "Descargar SRT")),
+            el("label", { class: "fix", style: "display:flex;gap:6px;align-items:center;margin:0" }, el("input", { type: "checkbox", style: "width:auto", checked: sel.has(key), onchange: (ev) => { if (ev.target.checked) sel.add(key); else sel.delete(key); } }), "Exportar")),
+          (v.issues || []).length ? el("details", { open: true }, el("summary", {}, (v.issues.length) + " aviso(s) de esta versión"), ...v.issues.slice(0, 8).map((x) => el("div", { class: "small warn" }, "⚠ " + x))) : null,
+          el("details", {}, el("summary", {}, "Transcripción y confianza"), el("div", { class: "tx" }, c.transcript || "(sin habla transcrita)"),
+            el("div", { class: "mut small" }, conf.words + " palabras · prob. media " + conf.mean_word_prob + " · " + conf.words_below_0_4_pct + " % con baja confianza" + (conf.low_confidence_words.length ? " (" + conf.low_confidence_words.slice(0, 8).join(", ") + ")" : ""))),
+          el("details", {}, el("summary", {}, "Por qué se eligió este momento"), ...c.reasons.map((r) => el("div", { class: "small mut" }, r.name + " " + r.value + " — " + r.note)),
+            ...c.refine_notes.map((n) => el("div", { class: "small mut" }, "Corte: " + n)))));
+    };
+    vsel.addEventListener("change", draw);
+    draw();
+    return el("div", { class: "card" }, el("div", { class: "row" }, el("strong", {}, c.name), el("span", { class: "fix mut small" }, "Versión mostrada:"), el("div", { class: "fix" }, vsel)), holder);
+  }
+  list.replaceChildren(...(D.clips.length ? D.clips.map(clipCard) : [el("div", { class: "card mut" }, sess.status === "completed" ? "No se encontraron momentos que superen el umbral: no se generaron clips." : "Esta sesión no tiene clips (" + (STATUS[sess.status] || sess.status) + ").")]));
+  view.replaceChildren(head, list);
+}
+
+/* ---------- editor ---------- */
+function openEditor(D, clip, version, onDone) {
+  const id = D.session.id;
+  const sourceOk = D.has_source;
+  let cues = null, loadedFor = null, dirty = false;
+  const start = el("input", { type: "number", step: "0.1", value: version.start }), end = el("input", { type: "number", step: "0.1", value: version.end });
+  const dur = el("div", { class: "small mut" });
+  const preset = el("select", {}, ...[["", "Igual que la sesión"], ["seguro", "Seguro: cuadro completo (blur-fit)"], ["gameplay", "Gameplay más grande (focus)"], ["pantalla", "Pantalla completa (recorta)"]].map(([v, l]) => el("option", { value: v }, l)));
+  const zoom = el("input", { type: "number", step: "0.05", min: 1, max: 2.5, value: 1.2 }), fgx = el("input", { type: "number", step: "0.05", min: 0, max: 1, value: 0.5 });
+  const keep = el("input", { type: "text", placeholder: "0,0,0.25,0.4;0.77,0.08,0.2,0.32" });
+  const focusBox = el("div", { class: "row", style: "display:none" }, el("div", {}, el("label", {}, "Zoom máximo"), zoom), el("div", {}, el("label", {}, "Posición horizontal (0 izq. – 1 der.)"), fgx),
+    el("div", {}, el("label", {}, "Regiones a no recortar (x,y,w,h; separadas por «;»)"), keep));
+  preset.addEventListener("change", () => { focusBox.style.display = preset.value === "gameplay" ? "" : "none"; });
+  const cueBox = el("div", {}), msg = el("div"), progress = el("div");
+  const src = sourceOk ? el("video", { controls: true, preload: "metadata", src: "/source/" + encodeURIComponent(id) + "#t=" + Math.max(0, version.start - 2) }) : el("div", { class: "box warn" }, "El video original ya no está en su ubicación: no se pueden cambiar los tiempos.");
+  const updDur = () => { const d = Number(end.value) - Number(start.value); dur.textContent = "Duración: " + (isFinite(d) ? d.toFixed(1) : "?") + " s" + (d < 3 ? " (mínimo 3 s)" : d > 60 ? " (máximo 60 s)" : (d < 8 || d > 30) ? " (fuera del rango habitual de 8–30 s)" : ""); };
+  start.addEventListener("input", updDur); end.addEventListener("input", updDur); updDur();
+  let previewTimer = null;
+  const preview = () => { if (!sourceOk) return; src.currentTime = Number(start.value); src.play(); clearInterval(previewTimer); previewTimer = setInterval(() => { if (src.currentTime >= Number(end.value)) { src.pause(); clearInterval(previewTimer); } }, 100); };
+  function cueRow(c, i) {
+    const t = el("textarea", { rows: 2 }); t.value = c.text;
+    const a = el("input", { type: "number", step: "0.05", value: c.start }), b = el("input", { type: "number", step: "0.05", value: c.end });
+    t.addEventListener("input", () => { c.text = t.value; c.edited = true; dirty = true; });
+    a.addEventListener("input", () => { c.start = Number(a.value); c.edited = true; dirty = true; });
+    b.addEventListener("input", () => { c.end = Number(b.value); c.edited = true; dirty = true; });
+    return el("div", { class: "cuerow" + (c.low_confidence ? " low" : "") }, a, b, t, el("button", { class: "fix", title: "Eliminar este subtítulo", onclick: () => { c.text = ""; c.edited = true; dirty = true; drawCues(); } }, "✕"));
+  }
+  function drawCues() {
+    cueBox.replaceChildren(...(cues && cues.length ? [el("div", { class: "mut small" }, "Tiempos en segundos del video original. Los subtítulos con borde de color tienen baja confianza de transcripción: revisalos. Editar el texto no retranscribe nada."),
+      ...cues.filter((c) => c.text !== "" || c.edited).map(cueRow)] : [el("div", { class: "mut small" }, cues ? "No hay subtítulos en este tramo." : "Los subtítulos se generan automáticamente desde la transcripción. Cargalos para editarlos.")]));
+  }
+  async function loadCues() {
+    const edits = (cues || []).filter((c) => c.edited).map((c) => ({ start: c.start, end: c.end, text: c.text }));
+    try {
+      const r = await api("/api/sessions/" + encodeURIComponent(id) + "/subtitles", { clip: clip.name, start: Number(start.value), end: Number(end.value), edits });
+      cues = r.cues; loadedFor = start.value + "|" + end.value; drawCues();
+    } catch (e) { msg.replaceChildren(el("div", { class: "box err" }, e.message)); }
+  }
+  const go = el("button", { class: "primary", onclick: async () => {
+    msg.replaceChildren(); go.disabled = true;
+    try {
+      if (cues && dirty && loadedFor !== start.value + "|" + end.value) await loadCues();   // conserva los textos editados al cambiar los tiempos
+      const body = { clip: clip.name, start: Number(start.value), end: Number(end.value), preset: preset.value || null };
+      if (preset.value === "gameplay") { body.fg_zoom = Number(zoom.value); body.fg_x = Number(fgx.value); if (keep.value.trim()) body.keep_regions = keep.value.split(";").map((s) => s.trim()).filter(Boolean); }
+      if (cues && dirty) body.cues = cues.map((c) => ({ start: c.start, end: c.end, text: c.text }));
+      const job = await api("/api/sessions/" + encodeURIComponent(id) + "/edit", body);
+      watch(job.id);
+    } catch (e) { msg.replaceChildren(el("div", { class: "box err" }, e.message)); go.disabled = false; }
+  } }, "Regenerar este clip");
+  function watch(jobId) {
+    const tick = async () => {
+      let j; try { j = await api("/api/jobs/" + jobId); } catch (e) { return; }
+      progress.replaceChildren(jobCard(j));
+      if (j.status === "queued" || j.status === "running") { setTimeout(tick, 1000); return; }
+      go.disabled = false;
+      if (j.status === "completed") { toast("Versión nueva creada. El original se conserva."); close(); onDone(); }
+    };
+    tick();
+  }
+  const modal = el("div", { class: "modal" }, el("div", { class: "dlg" },
+    el("h2", {}, "Editar " + clip.name), el("div", { class: "mut small" }, "Se crea una versión nueva; el clip original y las versiones anteriores no se modifican. No se retranscribe."),
+    src, sourceOk ? el("div", { class: "row", style: "margin:8px 0" }, el("button", { class: "fix", onclick: () => { start.value = src.currentTime.toFixed(2); updDur(); } }, "Marcar inicio aquí"),
+      el("button", { class: "fix", onclick: () => { end.value = src.currentTime.toFixed(2); updDur(); } }, "Marcar final aquí"), el("button", { class: "fix", onclick: preview }, "▶ Ver el tramo")) : null,
+    el("div", { class: "row" }, el("div", {}, el("label", {}, "Inicio (s)"), start), el("div", {}, el("label", {}, "Final (s)"), end), el("div", {}, dur)),
+    el("label", {}, "Presentación"), preset, focusBox,
+    el("h3", {}, "Subtítulos"), el("div", { class: "row" }, el("button", { class: "fix", onclick: loadCues }, cues ? "Actualizar según los tiempos" : "Cargar subtítulos del tramo")), cueBox,
+    msg, progress, el("div", { class: "row", style: "margin-top:14px" }, go, el("button", { class: "fix", onclick: () => close() }, "Cerrar"))));
+  function close() { clearInterval(previewTimer); modal.remove(); }
+  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+  document.body.append(modal);
+  drawCues();
+}
+
+route();
+api("/api/health").then((h) => { $("#pill").title = "StreamClipper " + h.version; }).catch(() => {});
+</script>
+</body>
+</html>

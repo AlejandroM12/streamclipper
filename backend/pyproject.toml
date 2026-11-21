@@ -16,6 +16,9 @@ dev = ["pytest", "ruff"]
 [tool.setuptools.packages.find]
 include = ["streamclipper*"]
 
+[tool.setuptools.package-data]
+"streamclipper.app" = ["static/*.html"]
+
 [tool.ruff]
 line-length = 130
 extend-exclude = [".venv"]
