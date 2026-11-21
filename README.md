@@ -34,6 +34,19 @@ cd backend
 .\.venv\Scripts\python.exe -m streamclipper evaluate <job> <job>-v2                      # antes/después
 ```
 
+### Validación con gameplay real y revisión humana
+
+```powershell
+.\.venv\Scripts\python.exe -m streamclipper session "<URL o MP4>" --label partida1 --language es   # base + small
+.\.venv\Scripts\python.exe -m streamclipper review partida1      # evaluar: bueno / necesita edición / no sirve
+.\.venv\Scripts\python.exe -m streamclipper reviews <job>        # job frente a tus evaluaciones guardadas
+```
+
+`session` procesa el video con ambos modelos (parámetros por defecto), renderiza los 3 mejores clips de cada uno, lista
+hasta 10 candidatos alternativos por modelo y escribe un informe por clip. `review` abre una página local (solo
+`127.0.0.1`) para evaluar y guarda tus evaluaciones por video y por momento, de modo que sirvan para comparar versiones
+futuras del algoritmo. Detalles: [docs/validation-session.md](docs/validation-session.md).
+
 ### Descargar desde YouTube (solo contenido propio o autorizado)
 
 ```powershell
