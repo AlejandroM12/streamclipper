@@ -51,13 +51,15 @@ def render_set(
         shutil.copy(srt_work, out_dir / srt_work.name)
         mp4 = out_dir / f"{name}.mp4"
         t0 = time.monotonic()
-        render_clip(src, start, end, ass_work, mp4, settings, cancel, layout)
+        fi, fo = (r.fade_in, r.fade_out) if r else (0.0, 0.0)
+        render_clip(src, start, end, ass_work, mp4, settings, cancel, layout, fi, fo)
         clips.append({
             "name": name, "rank": c.rank, "file": str(mp4), "start": round(start, 2), "end": round(end, 2),
             "duration": round(end - start, 2), "score": round(c.score, 3), "subtitle_lines": len(subs.cues),
             "subtitle_metrics": subs.metrics, "low_confidence_subtitles": subs.low_confidence,
             "selected_window": [round(c.start, 2), round(c.end, 2)], "refine_notes": r.notes if r else [],
-            "render_seconds": round(time.monotonic() - t0, 2), "layout": settings.layout,
+            "render_seconds": round(time.monotonic() - t0, 2), "layout": settings.layout, "framing": layout.framing,
+            "fade_in": fi, "fade_out": fo, "subtitle_problems": subs.problems, "duration_bounds": list(r.bounds) if r and r.bounds else None,
             "explanation": c.explanation(), "triggers": c.triggers,
         })
 
@@ -73,6 +75,8 @@ def render_set(
             warnings.append(f"{clip['name']}: {msg}")
         for msg in b["warnings"]:
             warnings.append(f"{clip['name']}: {msg}")
+        for msg in clip["subtitle_problems"]:
+            warnings.append(f"{clip['name']}: subtítulos: {msg}")
         if clip["low_confidence_subtitles"]:
             warnings.append(f"{clip['name']}: {len(clip['low_confidence_subtitles'])} subtítulo(s) con muchas palabras "
                             "de baja confianza (el texto puede estar mal; no se corrige automáticamente): "

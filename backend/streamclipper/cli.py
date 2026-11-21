@@ -10,7 +10,7 @@ from streamclipper.core.errors import StreamClipperError
 from streamclipper.evaluation import evaluate_jobs
 from streamclipper.export import export_alternatives
 from streamclipper.jobs import load_result
-from streamclipper.rerender import rerender_job
+from streamclipper.rerender import compare_variants, rerender_job
 from streamclipper.rescore import rescore_job
 from streamclipper.review import ReviewStore, coverage_against_reviews, write_alternatives
 from streamclipper.review_server import load_state, serve
@@ -99,6 +99,10 @@ def _build_parser() -> argparse.ArgumentParser:
     rr2.add_argument("--layout", choices=["blur-fit", "focus", "fill", "crop"], default=None)
     _add_style_args(rr2)
 
+    vr = sub.add_parser("variants", help="Compara el original y las versiones generadas con rerender (mismas métricas)")
+    vr.add_argument("job")
+    vr.add_argument("--tags", nargs="+", default=["stage3", "stage31"], help="Versiones a comparar (por defecto stage3 stage31)")
+
     rs = sub.add_parser("rescore", help="Re-puntúa un job con el algoritmo actual, sin retranscribir ni descargar")
     rs.add_argument("job", help="Id (o fragmento) del job, o ruta a su carpeta")
     rs.add_argument("--suffix", default="rescored", help="Sufijo del job nuevo")
@@ -139,6 +143,8 @@ _STYLE_FLAGS = [  # (flag, campo de Settings, tipo, ayuda)
     ("--refine-lead", "refine_lead", float, "margen antes del momento (s)"),
     ("--refine-tail", "refine_tail", float, "margen después de la reacción (s)"),
     ("--refine-min-post", "refine_min_post", float, "segundos mínimos que se conservan tras el momento principal"),
+    ("--refine-min-clip", "refine_min_clip", float, "duración mínima del clip FINAL (8-30 s; defecto 8)"),
+    ("--refine-max-clip", "refine_max_clip", float, "duración máxima del clip FINAL (8-30 s; defecto 30)"),
 ]
 
 
@@ -149,6 +155,10 @@ def _add_style_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--mark-low-conf", action="store_true", default=None,
                    help="Colorea las palabras de baja confianza en el video (para revisar; no para publicar)")
     p.add_argument("--no-refine", action="store_true", default=None, help="No ajustar el inicio y el final de los clips")
+    p.add_argument("--no-fades", action="store_true", default=None, help="Sin fades de audio en los bordes del clip")
+    p.add_argument("--keep", action="append", default=None, metavar="X,Y,W,H",
+                   help="Región a no recortar (facecam, HUD), normalizada 0-1; repetible. Se declara a mano: el sistema "
+                        "no detecta elementos visuales")
 
 
 def _style_overrides(args) -> dict:
@@ -158,6 +168,10 @@ def _style_overrides(args) -> dict:
         out["sub_mark_low_conf"] = True
     if getattr(args, "no_refine", None):
         out["refine_bounds"] = False
+    if getattr(args, "no_fades", None):
+        out["refine_fades"] = False
+    if getattr(args, "keep", None):
+        out["keep_regions"] = list(args.keep)
     return out
 
 
@@ -326,6 +340,16 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    {n['file']}")
             print(f"\nInforme: {m['job_dir']}\\rerender_{args.tag}.md")
             print(f"Memoria máx. (aprox.): {m['resources']['total_peak_mb_approx']} MB | render: {m['timing']['new_render_total_s']} s")
+            return 0
+
+        if args.cmd == "variants":
+            s = Settings()
+            data, text = compare_variants(args.job, args.tags, s)
+            out = resolve_job(args.job, s) / ("variants_" + "_".join(args.tags) + ".md")
+            out.write_text(text, encoding="utf-8")
+            (out.with_suffix(".json")).write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+            print(text)
+            print(f"Guardado en {out}")
             return 0
 
         if args.cmd == "rescore":
