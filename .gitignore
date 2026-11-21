@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+tools/ffmpeg/
+node_modules/
+.next/
+*.egg-info/

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streamclipper"
+version = "0.1.0"
+description = "Detecta momentos destacados en streams y los exporta como clips verticales."
+requires-python = ">=3.11"
+dependencies = ["faster-whisper>=1.0", "numpy>=1.26", "yt-dlp", "av>=16,<17"]  # av 19 rompe faster-whisper 1.2 (open(metadata_errors=...))
+
+[project.optional-dependencies]
+api = ["fastapi", "uvicorn[standard]"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["streamclipper*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: requiere ffmpeg y el modelo Whisper (lento)"]
