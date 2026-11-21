@@ -89,6 +89,78 @@ def test_subtitles_exist_and_match_clip_times(result):
         assert "Dialogue:" in ass and c["subtitle_lines"] > 0
 
 
+def test_report_files_and_contents(result):
+    job = Path(result["job_dir"])
+    rep = json.loads((job / "report.json").read_text(encoding="utf-8"))
+    assert (job / "report.md").read_text(encoding="utf-8").startswith("# Reporte")
+    assert rep["video_duration_s"] == pytest.approx(105.0, abs=0.1)
+    assert rep["whisper_model"] == "base" and rep["language"] == "en"
+    t = rep["timings_s"]
+    assert t["transcription"] > 0 and t["analysis"] >= 0 and t["rendering"] > 0 and t["total"] >= t["transcription"]
+    assert rep["clips_generated"] == len(rep["clips"]) == 2
+    assert rep["candidates_detected"] == len(rep["candidates"]) >= 2
+    assert all(c["reasons"] and c["triggers"] for c in rep["candidates"])
+    assert [c["rank"] for c in rep["candidates"] if c["selected"]] == [
+        c["rank"] for c in rep["clips"]] or len([c for c in rep["candidates"] if c["selected"]]) == 2
+    assert isinstance(rep["warnings"], list) and rep["error"] is None
+
+
+def test_peak_memory_is_measured(result):
+    r = result["resources"]
+    assert r["python_peak_mb"] > 100  # faster-whisper + modelo
+    assert r["ffmpeg_peak_mb"] > 0
+    assert r["total_peak_mb_approx"] >= r["python_peak_mb"]
+
+
+def test_clips_do_not_start_or_end_mid_sentence(result):
+    for c in result["clips"]:
+        assert c["boundaries"]["errors"] == [], c["boundaries"]
+
+
+def test_export_alternatives_without_retranscribing(result, monkeypatch):
+    import streamclipper.transcription.whisper as w
+    from streamclipper.export import export_alternatives
+
+    def boom(*a, **k):
+        raise AssertionError("no debe retranscribir")
+    monkeypatch.setattr(w, "transcribe", boom)
+
+    job = result["job_dir"]
+    done = {c["rank"] for c in result["clips"]}
+    extra = next(c["rank"] for c in result["candidates"] if c["rank"] not in done)
+    out = export_alternatives(job, Settings(), ranks=[extra])
+    assert len(out["clips"]) == 1
+    clip = out["clips"][0]
+    assert Path(clip["file"]).name == f"alt_{extra:02d}.mp4"
+    assert clip["validation"]["ok"] and clip["boundaries"]["errors"] == []
+    rep = json.loads((Path(job) / "report.json").read_text(encoding="utf-8"))
+    assert len(rep["alternative_clips"]) == 1
+    assert not list(Path(job).glob("work_export_*"))  # temporales eliminados
+    # re-exportar el mismo no duplica
+    again = export_alternatives(job, Settings(), ranks=[extra])
+    assert again["clips"] == [] and any("ya estaba exportado" in x for x in again["warnings"])
+
+
+def test_export_unknown_candidate_is_a_clear_error(result):
+    from streamclipper.core.errors import InvalidInputError
+    from streamclipper.export import export_alternatives
+    with pytest.raises(InvalidInputError, match="inexistentes"):
+        export_alternatives(result["job_dir"], Settings(), ranks=[999])
+
+
+def test_two_runs_keep_separate_results_and_compare(sample, result, tmp_path_factory):
+    """Dos ejecuciones del mismo video conservan resultados separados y se pueden comparar."""
+    from streamclipper.compare import compare_jobs
+    data = tmp_path_factory.mktemp("data2")
+    r2 = run_pipeline(str(sample), Settings(data_dir=data, language="en"), label="segunda")
+    assert r2["status"] == "completed"
+    assert r2["job_dir"] != result["job_dir"] and "base" in r2["job_id"]
+    text = compare_jobs(result["job_dir"], r2["job_dir"], Settings(data_dir=data))
+    assert "Probabilidad media por palabra" in text and "coinciden" in text
+    assert "NO usaron el mismo archivo" not in text
+    assert "2/2" in text  # mismos dos momentos
+
+
 def test_cancelled_job_leaves_no_temp_files_or_partial_outputs(sample, tmp_path):
     token = CancelToken()
     token.cancel()

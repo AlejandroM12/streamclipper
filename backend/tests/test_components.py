@@ -53,6 +53,14 @@ def test_split_sentences_breaks_long_segments_at_punctuation():
     assert [s.text for s in out] == ["Hello there.", "How are you?", "Fine."]
 
 
+def test_whisper_segment_edge_alone_does_not_split_a_sentence():
+    a = Segment(0, 1, "okay thanks for", [Word(0, 0.4, "okay"), Word(0.5, 0.8, "thanks"), Word(0.8, 1.0, "for")])
+    b = Segment(1.1, 2, "watching everyone.", [Word(1.1, 1.5, "watching"), Word(1.5, 2.0, "everyone.")])
+    out = split_sentences(Transcript("en", [a, b])).segments
+    assert [s.text for s in out] == ["okay thanks for watching everyone."]
+    assert (out[0].start, out[0].end) == (0, 2.0)
+
+
 # --- subtítulos --------------------------------------------------------------------------------
 def test_ass_timestamp_format():
     assert _ts(0) == "0:00:00.00"
