@@ -37,6 +37,31 @@ def _source_title(result: dict) -> str:
     return src.name or "video"
 
 
+def write_segment_meta(settings: Settings, session: str, meta: dict) -> None:
+    """Deja en la sesión del tramo a qué VOD y a qué rango pertenece (relación durable VOD → tramos → clips)."""
+    d = settings.jobs_dir / session
+    tmp = d / "segment.json.tmp"
+    tmp.write_text(json.dumps(meta, indent=1, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(d / "segment.json")
+
+
+def read_segment_meta(d: Path) -> dict | None:
+    try:
+        return json.loads((d / "segment.json").read_text(encoding="utf-8")) if (d / "segment.json").is_file() else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def group_detail(settings: Settings, group: str, active: set[str] | None = None) -> dict:
+    """Todas las sesiones (tramos) de un mismo VOD, en orden."""
+    segs = [s for s in list_sessions(settings, active) if (s.get("segment") or {}).get("group") == group]
+    if not segs:
+        raise ApiError(404, "No existe ese VOD o ya no tiene sesiones.")
+    segs.sort(key=lambda s: s["segment"]["index"])
+    first = segs[0]["segment"]
+    return {"id": group, "title": first["vod_title"], "url": first["url"], "platform": first["platform"], "segments": segs}
+
+
 def summarize(d: Path, result: dict, active: set[str]) -> dict:
     status = result.get("status", "?")
     if status == "running":   # un job que quedó «running» en disco y no está activo se interrumpió
@@ -52,7 +77,7 @@ def summarize(d: Path, result: dict, active: set[str]) -> dict:
         "candidates": len(result.get("candidates", [])), "variants": variants, "edits": edits,
         "warnings": len(result.get("warnings", [])), "error": result.get("error"),
         "total_seconds": result.get("total_seconds"), "rescored_from": result.get("rescored_from"),
-        "legacy": legacy,
+        "legacy": legacy, "segment": read_segment_meta(d),
     }
 
 

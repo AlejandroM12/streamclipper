@@ -2,6 +2,7 @@ import argparse
 import gc
 import json
 import sys
+from pathlib import Path
 
 from streamclipper.compare import compare_jobs, save_comparison
 from streamclipper.core.cancel import CancelToken
@@ -71,6 +72,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ap = sub.add_parser("app", help="Abre la aplicación web local de StreamClipper (solo en 127.0.0.1)")
     ap.add_argument("--port", type=int, default=8780)
     ap.add_argument("--no-open", action="store_true", help="No abrir el navegador automáticamente")
+    ap.add_argument("--data-dir", help="Carpeta de datos alternativa (por defecto, data/ del proyecto)")
 
     sub.add_parser("doctor", help="Comprueba que FFmpeg, yt-dlp, Whisper y el resto de requisitos estén listos")
 
@@ -253,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.cmd == "app":
             from streamclipper.app.server import serve_app
-            serve_app(Settings(), args.port, not args.no_open)
+            serve_app(Settings(data_dir=Path(args.data_dir).resolve()) if args.data_dir else Settings(), args.port, not args.no_open)
             return 0
 
         if args.cmd == "doctor":

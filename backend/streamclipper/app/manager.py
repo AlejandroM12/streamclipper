@@ -15,13 +15,15 @@ from pathlib import Path
 from typing import Callable
 
 from streamclipper.app.state import (
-    ACTIVE, EDIT_STAGES, PROCESS_STAGES, AppJob, JobStore, make_stages,
+    ACTIVE, EDIT_STAGES, PROCESS_STAGES, SEGMENT_STAGES, AppJob, JobStore, Segment, make_stages,
 )
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
 from streamclipper.core.errors import CancelledError, InvalidInputError, StreamClipperError
 from streamclipper.core.sysinfo import available_ram_gb
-from streamclipper.media.download import parse_media_url
+from streamclipper.media.download import (
+    DownloadLimits, format_hms, inspect_media, is_segmentable, parse_media_url, validate_segments,
+)
 from streamclipper.pipeline import resolve_input
 from streamclipper.webutil import ApiError
 
@@ -52,24 +54,25 @@ def friendly_error(text: str) -> tuple[str, str | None]:
 @dataclass
 class JobControl:
     """Lo que un runner puede hacer con su trabajo: informar etapas, avisos y comprobar la cancelación."""
-    job: AppJob
+    job: "AppJob | Segment"
     manager: "JobManager"
     cancel: CancelToken
+    root: AppJob | None = None        # en un tramo: el trabajo VOD que lo contiene (es el que se guarda)
 
     def stage(self, key: str, status: str, fraction: float | None = None, detail: str = "") -> None:
-        self.manager._set_stage(self.job, key, status, fraction, detail)
+        self.manager._set_stage(self.job, key, status, fraction, detail, self.root)
 
     def warn(self, msg: str) -> None:
         with self.manager._lock:
             if msg not in self.job.warnings:
                 self.job.warnings.append(msg)
-        self.manager._save(self.job, force=True)
+        self.manager._save(self.root or self.job, force=True)
 
     def set(self, **fields) -> None:
         with self.manager._lock:
             for k, v in fields.items():
                 setattr(self.job, k, v)
-        self.manager._save(self.job, force=True)
+        self.manager._save(self.root or self.job, force=True)
 
     def pipeline_progress(self, stage: str, frac: float, msg: str) -> None:
         """Mapea el callback del pipeline. Solo se muestra una fracción cuando el avance es real."""
@@ -87,9 +90,10 @@ Runner = Callable[[AppJob, JobControl], None]
 
 class JobManager:
     def __init__(self, settings: Settings, runners: dict[str, Runner] | None = None, max_queue: int = 8,
-                 autostart: bool = True) -> None:
+                 autostart: bool = True, inspector: Callable[[str], dict] | None = None) -> None:
         self.settings = settings
         self.max_queue = max_queue
+        self.inspector = inspector or (lambda url: inspect_media(url, DownloadLimits()))
         self.store = JobStore(settings.data_dir / "app" / "jobs")
         self._lock = threading.RLock()
         self._jobs: dict[str, AppJob] = {j.id: j for j in self.store.load_all()}
@@ -116,6 +120,10 @@ class JobManager:
                 for s in job.stages:
                     if s["status"] == "running":
                         s["status"], s["detail"] = "cancelled", "interrumpido"
+                for seg in job.segments:   # los tramos terminados se conservan; el que estaba en curso se repetirá
+                    if seg.status == "running":
+                        seg.status, seg.message = "pending", "Interrumpido: se repetirá al continuar"
+                        seg.stages = make_stages(SEGMENT_STAGES)
                 self.store.save(job)
         cleanup_stale(self.settings)
 
@@ -150,6 +158,37 @@ class JobManager:
         self._check_capacity()
         job = AppJob(id=AppJob.new_id(), kind="process", title=title, input=source, input_kind=kind, params=params,
                      dup_key=dup_key, stages=make_stages((["descarga"] if kind == "url" else []) + PROCESS_STAGES))
+        return self._enqueue(job)
+
+    def submit_vod(self, source: str, segments: list, params: dict | None = None, force: bool = False) -> AppJob:
+        """Encola el procesamiento de uno o varios tramos de un VOD de Twitch o Kick (un solo trabajo, tramos en serie)."""
+        params = self._clean_params(params or {})
+        source = (source or "").strip()
+        try:
+            ref = parse_media_url(source)
+        except InvalidInputError as e:
+            raise ApiError(400, str(e)) from None
+        if not is_segmentable(ref):
+            raise ApiError(400, "Los tramos solo se pueden elegir en un VOD de Twitch o Kick.")
+        info = self.inspector(ref.canonical_url)
+        if not info.get("duration") or not info.get("acceptable"):
+            raise ApiError(400, info.get("reason") or "No se pudo obtener la duración del VOD.")
+        try:
+            spans = validate_segments(segments, info["duration"])
+        except InvalidInputError as e:
+            raise ApiError(400, str(e)) from None
+        tag = ",".join(f"{s}-{e}" for s, e in spans)
+        dup_key = "|".join([f"vod:{ref.platform}:{ref.video_id}", tag, params["model"], str(params["language"]), params["layout"],
+                            str(params["max_clips"])])
+        self._check_duplicate(dup_key, force)
+        self._check_capacity()
+        title = info.get("title") or f"{ref.label} VOD {ref.video_id}"
+        segs = [Segment(i, s, e, stages=make_stages(SEGMENT_STAGES)) for i, (s, e) in enumerate(spans)]
+        job = AppJob(id=AppJob.new_id(), kind="vod", title=title, input=ref.canonical_url, input_kind="vod",
+                     params={**params, "platform_name": ref.label, "vod_id": ref.video_id, "vod_duration": info["duration"],
+                             "uploader": info.get("uploader")},
+                     dup_key=dup_key, segments=segs, message=f"{len(segs)} tramo(s): "
+                     + ", ".join(f"{format_hms(s)}–{format_hms(e)}" for s, e in spans))
         return self._enqueue(job)
 
     def submit_edit(self, session: str, clip: str, params: dict) -> AppJob:
@@ -248,6 +287,8 @@ class JobManager:
                 raise ApiError(404, "No existe ese trabajo.")
             if old.status in ACTIVE or old.status == "completed":
                 raise ApiError(409, "Solo se pueden reintentar trabajos fallidos, cancelados o interrumpidos.")
+        if old.kind == "vod":
+            return self._retry_vod(job_id)
         if old.kind == "edit":
             return self.submit_edit(old.params["session"], old.params["clip"], {k: v for k, v in old.params.items()
                                                                                  if k not in ("session", "clip")})
@@ -257,13 +298,31 @@ class JobManager:
         """Elimina una sesión salvo que se esté procesando o tenga una edición en curso o en cola."""
         from streamclipper.app.sessions import delete_session
         with self._lock:   # el candado impide que una edición nueva arranque sobre la sesión mientras se borra
-            busy = [j for j in self._jobs.values() if j.status in ACTIVE and name in (j.session, j.params.get("session"))]
+            busy = [j for j in self._jobs.values() if j.status in ACTIVE
+                    and name in (j.session, j.params.get("session"), *(s.session for s in j.segments))]
             if busy:
                 raise ApiError(409, "Esta sesión se está procesando o tiene una edición en curso. Cancelá el trabajo o esperá "
                                     "a que termine antes de eliminarla.")
             from streamclipper.app.runners import session_dir
             session_dir(self.settings, name)   # valida el nombre y que exista
             return delete_session(self.settings, name)
+
+    def _retry_vod(self, job_id: str) -> AppJob:
+        """Continúa un VOD: los tramos terminados se conservan y solo se repiten los pendientes, fallidos o cancelados."""
+        with self._lock:
+            job = self._jobs[job_id]
+            todo = [s for s in job.segments if s.status != "done"]
+            if not todo:
+                raise ApiError(409, "Todos los tramos de este VOD ya están listos.")
+            self._check_capacity()
+            for s in todo:
+                s.reset()
+            job.status, job.error, job.hint, job.error_detail, job.finished_at = "queued", None, None, None, None
+            job.message = f"Continuando: {len(todo)} tramo(s) pendiente(s)"
+            self._tokens[job_id] = CancelToken()
+        self._save(job, force=True)
+        self._q.put(job_id)
+        return job
 
     def shutdown(self, timeout: float = 20.0) -> None:
         """Cancela el trabajo en curso y detiene el worker (el estado queda guardado como «interrumpido»)."""
@@ -292,7 +351,8 @@ class JobManager:
             snapshot = AppJob.from_dict(job.to_dict())
         self.store.save(snapshot)
 
-    def _set_stage(self, job: AppJob, key: str, status: str, fraction: float | None, detail: str) -> None:
+    def _set_stage(self, job: "AppJob | Segment", key: str, status: str, fraction: float | None, detail: str,
+                   root: AppJob | None = None) -> None:
         with self._lock:
             st = job.stage(key)
             if st is None:
@@ -307,7 +367,9 @@ class JobManager:
             if detail:
                 st["detail"] = detail
             job.message = f"{st['label']}" + (f": {detail}" if detail else "")
-        self._save(job, force=status != "running" or fraction is None)
+            if root is not None:
+                root.message = f"Tramo {job.index + 1} de {len(root.segments)} · {job.message}"
+        self._save(root or job, force=status != "running" or fraction is None)
 
     # --- worker -------------------------------------------------------------------------------------
     def _loop(self) -> None:
@@ -348,11 +410,21 @@ class JobManager:
                 for s in job.stages:
                     if s["status"] == "running":
                         s["status"] = "failed"
+                for seg in job.segments:
+                    if seg.status == "running":
+                        seg.status, seg.error = "failed", error
             elif outcome == "cancelled":
                 for s in job.stages:
                     if s["status"] == "running":
                         s["status"] = "cancelled"
-                job.message = "Cancelado."
+                for seg in job.segments:
+                    if seg.status == "running":
+                        seg.status = "cancelled"
+                    for s in seg.stages:
+                        if s["status"] == "running":
+                            s["status"] = "cancelled"
+                job.message = "Cancelado." if not job.segments else \
+                    f"Cancelado. {sum(s.status == 'done' for s in job.segments)} de {len(job.segments)} tramo(s) quedaron listos."
             else:
                 job.message = "Listo."
             job.status = outcome

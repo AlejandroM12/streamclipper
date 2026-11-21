@@ -78,6 +78,9 @@ async function api(url, body, method) {
   return data;
 }
 function toast(msg, ms) { const t = el("div", { class: "toast" }, msg); document.body.append(t); setTimeout(() => t.remove(), ms || 3500); }
+const hms = (t) => { t = Math.max(0, Math.floor(t || 0)); return String(Math.floor(t / 3600)).padStart(2, "0") + ":" + String(Math.floor(t % 3600 / 60)).padStart(2, "0") + ":" + String(t % 60).padStart(2, "0"); };
+const parseHms = (v) => { const m = /^(\d{1,3}):([0-5]\d):([0-5]\d)$/.exec(String(v || "").trim()); return m ? (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) : null; };
+const SEG_STATUS = { pending: "En espera", running: "En curso", done: "Listo", failed: "Falló", cancelled: "Cancelado" };
 const mm = (s) => { s = Math.max(0, s || 0); return Math.floor(s / 60) + ":" + (s % 60).toFixed(1).padStart(4, "0"); };
 const fdate = (t) => new Date(t * 1000).toLocaleString("es-AR", { dateStyle: "short", timeStyle: "short" });
 const mediaUrl = (sess, rel) => "/media/" + encodeURIComponent(sess) + "/" + rel.split("/").map(encodeURIComponent).join("/");
@@ -90,7 +93,7 @@ let CONFIG = null, JOBS = [], pollTimer = null, currentView = null;
 const NAV = [["#/", "Nuevo"], ["#/sesiones", "Sesiones"], ["#/estado", "Estado del sistema"]];
 function renderNav() {
   const h = location.hash || "#/";
-  const nav = $("#nav"); nav.replaceChildren(...NAV.map(([href, label]) => el("a", { href, class: (h === href || (href === "#/sesiones" && h.startsWith("#/sesion/"))) ? "on" : "" }, label)));
+  const nav = $("#nav"); nav.replaceChildren(...NAV.map(([href, label]) => el("a", { href, class: (h === href || (href === "#/sesiones" && (h.startsWith("#/sesion/") || h.startsWith("#/vod/")))) ? "on" : "" }, label)));
 }
 window.addEventListener("hashchange", route);
 async function route() {
@@ -103,6 +106,7 @@ async function route() {
     else if (h === "#/sesiones") await viewSessions(view);
     else if (h === "#/estado") await viewDoctor(view);
     else if (h.startsWith("#/sesion/")) await viewSession(view, decodeURIComponent(h.slice(9)));
+    else if (h.startsWith("#/vod/")) await viewGroup(view, decodeURIComponent(h.slice(6)));
     else view.replaceChildren(el("div", { class: "card" }, "Página no encontrada."));
   } catch (e) { view.replaceChildren(el("div", { class: "card err" }, "No se pudo cargar: " + e.message)); }
 }
@@ -118,13 +122,30 @@ function stageRow(s) {
   return el("div", { class: "stage" }, el("span", { class: s.status === "done" ? "ok" : s.status === "failed" ? "err" : "" }, ICON[s.status] || "○"), main,
     el("span", { class: "mut small" }, right));
 }
+function segCard(sg, j) {
+  const box = el("div", { class: "box" + (sg.status === "failed" ? " err" : "") },
+    el("div", {}, el("strong", {}, "Tramo " + (sg.index + 1) + " · " + hms(sg.start) + "–" + hms(sg.end)), " ",
+      el("span", { class: "badge " + (sg.status === "done" ? "completed" : sg.status === "failed" ? "failed" : sg.status === "running" ? "running" : "cancelled") }, SEG_STATUS[sg.status] || sg.status),
+      sg.status === "done" && sg.result && sg.result.clips != null ? el("span", { class: "mut small" }, "  " + sg.result.clips + " clip(s)") : null));
+  if (sg.status === "running" || sg.status === "failed" || sg.status === "cancelled") box.append(el("div", { class: "stages" }, sg.stages.filter((x) => x.status !== "pending" || sg.status === "running").map(stageRow)));
+  if (sg.message && sg.status === "pending") box.append(el("div", { class: "mut small" }, sg.message));
+  for (const w of (sg.warnings || []).slice(0, 3)) box.append(el("div", { class: "small warn" }, "⚠ " + w));
+  if (sg.error) { box.append(el("div", { class: "small err" }, sg.error)); if (sg.hint) box.append(el("div", { class: "small mut" }, "Sugerencia: " + sg.hint)); }
+  if (sg.session && sg.status === "done") box.append(el("a", { href: "#/sesion/" + encodeURIComponent(sg.session) }, "Abrir los clips de este tramo"));
+  return box;
+}
 function jobCard(j) {
   const active = j.status === "queued" || j.status === "running";
+  const isVod = j.kind === "vod";
   const box = el("div", { class: "job" },
     el("h3", {}, j.title || j.id, "  ", el("span", { class: "badge " + j.status }, STATUS[j.status] || j.status),
       j.status === "queued" && j.queue_position ? el("span", { class: "mut small" }, "  posición " + j.queue_position + " en la cola") : null),
-    el("div", { class: "mut small" }, (j.kind === "edit" ? "Edición · " : "Procesamiento · ") + fdate(j.created_at) + (j.params && j.params.model ? " · Whisper " + j.params.model : "")),
+    el("div", { class: "mut small" }, (j.kind === "edit" ? "Edición · " : isVod ? (j.params.platform_name || "") + " VOD por tramos · " : "Procesamiento · ") + fdate(j.created_at) + (j.params && j.params.model ? " · Whisper " + j.params.model : "")),
     el("div", { class: "stages" }, j.stages.map(stageRow)));
+  if (isVod) {
+    const done = j.segments.filter((x) => x.status === "done").length;
+    box.append(el("div", { class: "small" }, done + " de " + j.segments.length + " tramo(s) listos"), ...j.segments.map((x) => segCard(x, j)));
+  }
   if (j.message && active) box.append(el("div", { class: "mut small" }, j.message));
   for (const w of (j.warnings || []).slice(0, 4)) box.append(el("div", { class: "box warn" }, "⚠ " + w));
   if (j.error) {
@@ -134,7 +155,8 @@ function jobCard(j) {
   }
   const acts = el("div", { class: "row" });
   if (active) acts.append(el("button", { class: "danger fix", onclick: async () => { try { await api("/api/jobs/" + j.id + "/cancel", {}); loadJobs(); } catch (e) { toast(e.message); } } }, "Cancelar"));
-  if (["failed", "cancelled", "interrupted"].includes(j.status)) acts.append(el("button", { class: "fix", onclick: async () => { try { await api("/api/jobs/" + j.id + "/retry", {}); loadJobs(); } catch (e) { toast(e.message); } } }, "Reintentar"));
+  if (["failed", "cancelled", "interrupted"].includes(j.status)) acts.append(el("button", { class: "fix", onclick: async () => { try { await api("/api/jobs/" + j.id + "/retry", {}); loadJobs(); } catch (e) { toast(e.message); } } }, isVod ? "Continuar con los tramos pendientes y fallidos" : "Reintentar"));
+  if (isVod && j.segments.some((x) => x.session) && !active) acts.append(el("a", { href: "#/vod/" + encodeURIComponent(j.id) }, el("button", { class: "primary fix" }, "Ver los clips de todos los tramos")));
   if (j.session && ["completed", "failed", "cancelled", "interrupted"].includes(j.status) && j.kind === "process")
     acts.append(el("a", { href: "#/sesion/" + encodeURIComponent(j.session) }, el("button", { class: "primary fix" }, j.status === "completed" ? "Abrir clips" : "Ver sesión")));
   if (acts.children.length) box.append(acts);
@@ -144,7 +166,7 @@ async function loadJobs() {
   try { JOBS = (await api("/api/jobs")).jobs; } catch (e) { return; }
   const box = $("#jobs");
   if (box) {
-    const list = JOBS.filter((j) => j.kind === "process").slice(0, 6);
+    const list = JOBS.filter((j) => j.kind !== "edit").slice(0, 6);
     box.replaceChildren(...(list.length ? list.map(jobCard) : [el("div", { class: "mut" }, "Todavía no procesaste ningún video en esta aplicación.")]));
   }
   const n = JOBS.filter((j) => j.status === "queued" || j.status === "running").length;
@@ -167,8 +189,65 @@ async function viewNew(view) {
   for (const m of CONFIG.models) model.append(el("option", { value: m.id, selected: m.id === D.model }, m.label + (m.cached ? "" : " — se descarga la primera vez")));
   layout.append(el("option", { value: "blur-fit" }, "Seguro: cuadro completo con fondo desenfocado"), el("option", { value: "focus" }, "Gameplay más grande (recorta los costados)"));
   for (const p of CONFIG.platforms) platform.append(el("option", { value: p }, p === "universal" ? "Universal (TikTok, Reels y Shorts)" : p));
+  const go = el("button", { class: "primary", type: "button" }, "Procesar");
   const preview = el("div", {});
   let previewSeq = 0, previewTimer = null;
+  let segInfo = null;                       // resultado de /api/inspect cuando es un VOD de Twitch/Kick
+  const segBox = el("div", { style: "display:none" });
+  let segRows = [], segErr = [], segDur = [], segTotal = null, segAdd = null;
+  function segValidate() {
+    const errs = segRows.map(() => ""), spans = [];
+    let total = 0;
+    segRows.forEach((r, i) => {
+      const a = parseHms(r.start), b = parseHms(r.end);
+      if (a == null || b == null) { errs[i] = "Usá el formato HH:MM:SS"; return; }
+      if (b <= a) { errs[i] = "El final debe ser posterior al inicio"; return; }
+      const len = b - a;
+      if (len < segInfo.min_segment_s) errs[i] = "Mínimo " + segInfo.min_segment_s + " s";
+      else if (len > segInfo.max_segment_s) errs[i] = "Máximo " + segInfo.max_segment_s / 60 + " min por tramo";
+      else if (b > Math.floor(segInfo.duration)) errs[i] = "El VOD dura " + hms(segInfo.duration);
+      spans.push({ a, b, i });
+    });
+    spans.sort((x, y) => x.a - y.a);
+    for (let k = 1; k < spans.length; k++) if (spans[k].a < spans[k - 1].b) { errs[spans[k].i] = errs[spans[k].i] || "Se superpone con otro tramo"; errs[spans[k - 1].i] = errs[spans[k - 1].i] || "Se superpone con otro tramo"; }
+    segRows.forEach((r, i) => { if (!errs[i]) total += parseHms(r.end) - parseHms(r.start); });
+    return { errs, total, ok: segRows.length > 0 && errs.every((x) => !x) };
+  }
+  function segRefresh() {
+    if (!segInfo) { go.disabled = false; return; }
+    const v = segValidate();
+    segRows.forEach((r, i) => {
+      const a = parseHms(r.start), b = parseHms(r.end);
+      segDur[i].textContent = a != null && b != null && b > a ? "Duración: " + hms(b - a) : "";
+      segErr[i].textContent = v.errs[i];
+    });
+    segTotal.textContent = segRows.length ? "Tiempo total seleccionado: " + hms(v.total) + " en " + segRows.length + " tramo(s) · hasta " + segInfo.max_segments + " tramos de " + segInfo.max_segment_s / 60 + " min." : "Agregá al menos un tramo.";
+    segAdd.disabled = segRows.length >= segInfo.max_segments;
+    go.disabled = !v.ok;
+  }
+  function segDraw() {
+    segErr = []; segDur = [];
+    const rowsEl = segRows.map((r, i) => {
+      const a = el("input", { type: "text", value: r.start, placeholder: "00:00:00", style: "max-width:120px" }), b = el("input", { type: "text", value: r.end, placeholder: "00:20:00", style: "max-width:120px" });
+      a.addEventListener("input", () => { r.start = a.value; segRefresh(); }); b.addEventListener("input", () => { r.end = b.value; segRefresh(); });
+      const d = el("span", { class: "mut small fix" }), e = el("span", { class: "err small" });
+      segDur.push(d); segErr.push(e);
+      return el("div", { class: "row", style: "align-items:center;margin:4px 0" }, el("span", { class: "fix" }, "Tramo " + (i + 1)), el("div", { class: "fix" }, a), el("span", { class: "fix" }, "→"), el("div", { class: "fix" }, b), d,
+        el("button", { class: "fix danger", type: "button", title: "Eliminar este tramo", onclick: () => { segRows.splice(i, 1); segDraw(); } }, "✕"), e);
+    });
+    segAdd = el("button", { type: "button", class: "fix", onclick: () => {
+      const last = segRows.length ? parseHms(segRows[segRows.length - 1].end) : null;
+      const a = last != null ? last : 0, b = Math.min(a + 600, Math.floor(segInfo.duration));
+      segRows.push({ start: hms(a), end: hms(b) }); segDraw();
+    } }, "+ Agregar tramo");
+    segTotal = el("div", { class: "small", style: "margin-top:6px" });
+    const whole = segInfo.duration <= segInfo.max_segment_s ? el("button", { type: "button", class: "fix", onclick: () => { segRows = [{ start: "00:00:00", end: hms(segInfo.duration) }]; segDraw(); } }, "Usar todo el VOD") : null;
+    segBox.replaceChildren(el("h3", {}, "Tramos a procesar"),
+      el("div", { class: "mut small" }, "Este VOD dura " + hms(segInfo.duration) + ". Elegí hasta " + segInfo.max_segments + " tramos de hasta " + segInfo.max_segment_s / 60 + " min (formato HH:MM:SS). Solo se descargan esos tramos, nunca el VOD completo. El corte puede empezar unos segundos antes por los keyframes."),
+      ...rowsEl, el("div", { class: "row" }, segAdd, whole), segTotal);
+    segBox.style.display = "";
+    segRefresh();
+  }
   async function checkUrl() {
     const v = url.value.trim(), seq = ++previewSeq;
     if (!v) { preview.replaceChildren(); return; }
@@ -176,19 +255,21 @@ async function viewNew(view) {
     try {
       const r = await api("/api/inspect", { url: v });
       if (seq !== previewSeq) return;   // llegó tarde: el usuario ya cambió la URL
-      const mins = r.duration ? (r.duration >= 3600 ? (r.duration / 3600).toFixed(1) + " h" : (r.duration / 60).toFixed(1) + " min") : "duración desconocida";
+      const mins = r.duration ? (r.segmentable ? hms(r.duration) : r.duration >= 3600 ? (r.duration / 3600).toFixed(1) + " h" : (r.duration / 60).toFixed(1) + " min") : "duración desconocida";
       preview.replaceChildren(el("div", { class: "box" + (r.acceptable ? "" : " warn") },
         el("strong", {}, r.title || "(sin título)"),
         el("div", { class: "small mut" }, r.platform_label + " · " + r.kind_label + " · " + mins + (r.uploader ? " · " + r.uploader : "") + (r.estimated_mb ? " · ≈ " + r.estimated_mb + " MB" : "")),
-        r.acceptable ? el("div", { class: "small ok" }, "✓ Cumple los límites: se puede procesar.") : el("div", { class: "small err" }, "✗ " + (r.reason || "No se puede procesar este video.")),
+        r.acceptable ? el("div", { class: "small ok" }, r.segmentable ? "✓ VOD: elegí abajo los tramos que querés procesar." : "✓ Cumple los límites: se puede procesar.") : el("div", { class: "small err" }, "✗ " + (r.reason || "No se puede procesar este video.")),
         ...(r.warnings || []).map((w) => el("div", { class: "small warn" }, "⚠ " + w))));
+      if (r.segmentable) { segInfo = r; segRows = [{ start: "00:00:00", end: hms(Math.min(600, Math.floor(r.duration))) }]; segDraw(); }
     } catch (e) {
       if (seq !== previewSeq) return;
       preview.replaceChildren(el("div", { class: "box err" }, e.message));
     }
   }
-  url.addEventListener("input", () => { clearTimeout(previewTimer); previewSeq++; if (!url.value.trim()) { preview.replaceChildren(); return; } previewTimer = setTimeout(checkUrl, 700); });
-  const urlBox = el("div", {}, el("label", {}, "URL de YouTube, Twitch o Kick"), url, preview,
+  const segReset = () => { segInfo = null; segRows = []; segBox.style.display = "none"; segBox.replaceChildren(); go.disabled = false; };
+  url.addEventListener("input", () => { clearTimeout(previewTimer); previewSeq++; segReset(); if (!url.value.trim()) { preview.replaceChildren(); return; } previewTimer = setTimeout(checkUrl, 700); });
+  const urlBox = el("div", {}, el("label", {}, "URL de YouTube, Twitch o Kick"), url, preview, segBox,
     el("div", { class: "mut small" }, "Solo videos públicos: YouTube, VOD o clip de Twitch, VOD o clip de Kick (no directos, listas ni canales). Hasta " + CONFIG.url_limits.max_minutes + " min, " + CONFIG.url_limits.max_mb + " MB y " + CONFIG.url_limits.max_height + "p. Sin cuentas ni cookies. Usá contenido propio o con autorización."));
   const fileBox = el("div", { style: "display:none" }, el("label", {}, "Archivo de video (MP4, MKV, MOV o WEBM)"),
     el("div", { class: "row" }, path, el("button", { class: "fix", type: "button", onclick: async (ev) => {
@@ -205,12 +286,12 @@ async function viewNew(view) {
     kind = k; urlBox.style.display = k === "url" ? "" : "none"; fileBox.style.display = k === "file" ? "" : "none";
     segBtns.forEach((b, i) => b.classList.toggle("on", ["url", "file"][i] === k));
   } }, label));
-  const go = el("button", { class: "primary", type: "button" }, "Procesar");
   async function submit(force) {
     go.disabled = true;
+    const segs = kind === "url" && segInfo ? segRows.map((r) => ({ start: r.start.trim(), end: r.end.trim() })) : null;
     const params = { model: model.value, language: lang.value, layout: layout.value, max_clips: Number(clips.value), platform: platform.value };
     try {
-      await api("/api/jobs", { source: kind === "url" ? url.value : path.value, params, force: !!force });
+      await api("/api/jobs", { source: kind === "url" ? url.value : path.value, params, force: !!force, ...(segs ? { segments: segs } : {}) });
       toast("Trabajo agregado. El progreso aparece abajo.");
       loadJobs();
     } catch (e) {
@@ -222,6 +303,7 @@ async function viewNew(view) {
       } else $("#formmsg").replaceChildren(el("div", { class: "box err" }, e.message));
     }
     go.disabled = false;
+    segRefresh();
   }
   go.addEventListener("click", () => { $("#formmsg").replaceChildren(); submit(false); });
   view.replaceChildren(
@@ -254,7 +336,24 @@ async function viewSessions(view) {
   const draw = () => {
     const q = filter.value.toLowerCase();
     const items = sessions.filter((s) => !q || (s.title + " " + (s.model || "") + " " + s.id).toLowerCase().includes(q));
-    grid.replaceChildren(...(items.length ? items.map((s) => el("div", { class: "card sess" + (s.legacy ? " legacy" : ""), title: s.legacy ? "Sesión de una versión muy antigua: no se puede abrir" : "",
+    const groups = new Map(), entries = [];
+    for (const s of items) {
+      if (!s.segment) { entries.push({ s }); continue; }
+      let g = groups.get(s.segment.group);
+      if (!g) { g = { group: s.segment.group, vod: s.segment, segs: [], created: s.created }; groups.set(s.segment.group, g); entries.push({ g }); }
+      g.segs.push(s);
+    }
+    const groupCard = (g) => {
+      g.segs.sort((a, b) => a.segment.index - b.segment.index);
+      return el("div", { class: "card sess", style: "grid-column:1/-1", onclick: () => { location.hash = "#/vod/" + encodeURIComponent(g.group); } },
+        el("strong", {}, g.vod.vod_title), el("div", { class: "mut small" }, g.vod.platform + " VOD · " + fdate(g.created) + " · " + g.segs.length + " de " + g.vod.count + " tramo(s) con sesión · " + g.segs.reduce((n, x) => n + x.clips, 0) + " clip(s) en total"),
+        ...g.segs.map((s) => el("div", { class: "row", style: "align-items:center;margin-top:6px", onclick: (ev) => ev.stopPropagation() },
+          el("span", { class: "fix" }, "Tramo " + (s.segment.index + 1) + " · " + s.segment.start_hms + "–" + s.segment.end_hms), el("span", { class: "badge fix " + s.status }, STATUS[s.status] || s.status),
+          el("span", { class: "fix" }, s.clips + " clip(s)"), el("a", { class: "fix", href: "#/sesion/" + encodeURIComponent(s.id) }, "Abrir solo este tramo"),
+          el("button", { class: "danger fix", disabled: busy(s), title: busy(s) ? "No se puede eliminar mientras se procesa" : "", onclick: (ev) => { ev.stopPropagation(); remove(s); } }, "Eliminar sesión"))),
+        el("div", { class: "mut small", style: "margin-top:6px" }, "Clic en la tarjeta para revisar los clips de todos los tramos."));
+    };
+    grid.replaceChildren(...(items.length ? entries.map((en) => en.g ? groupCard(en.g) : en.s).map((s) => s instanceof Node ? s : el("div", { class: "card sess" + (s.legacy ? " legacy" : ""), title: s.legacy ? "Sesión de una versión muy antigua: no se puede abrir" : "",
       onclick: () => { if (!s.legacy) location.hash = "#/sesion/" + encodeURIComponent(s.id); } },
       el("strong", {}, s.title), el("div", { class: "mut small" }, fdate(s.created) + " · Whisper " + (s.model || "?") + (s.language ? " · " + s.language : "")),
       el("div", { style: "margin-top:6px" }, el("span", { class: "badge " + s.status }, STATUS[s.status] || s.status), " ",
@@ -279,7 +378,21 @@ async function viewDoctor(view) {
 }
 
 /* ---------- vista: sesión (galería) ---------- */
-async function viewSession(view, id) {
+async function viewSession(view, id) { view.replaceChildren(await buildSession(id, () => viewSession(view, id))); }
+async function viewGroup(view, gid) {
+  const G = await api("/api/groups/" + encodeURIComponent(gid));
+  const refresh = () => viewGroup(view, gid);
+  const total = G.segments.reduce((n, x) => n + x.clips, 0);
+  const parts = [el("div", { class: "card" }, el("h2", {}, G.title),
+    el("div", { class: "mut small" }, G.platform + " VOD · " + G.segments.length + " tramo(s) · " + total + " clip(s) en total"), el("div", { class: "mut small" }, G.url),
+    el("div", { class: "mut small" }, "Cada tramo es una sesión con sus propios clips, valoraciones, edición y exportación.")) ];
+  for (const x of G.segments) {
+    parts.push(el("h2", { style: "margin:6px 0 0" }, "Tramo " + (x.segment.index + 1) + " de " + x.segment.count + " · " + x.segment.start_hms + "–" + x.segment.end_hms));
+    try { parts.push(await buildSession(x.id, refresh)); } catch (e) { parts.push(el("div", { class: "card err" }, "No se pudo abrir este tramo: " + e.message)); }
+  }
+  view.replaceChildren(...parts);
+}
+async function buildSession(id, refresh) {
   if (!CONFIG) CONFIG = await api("/api/config");
   const D = await api("/api/sessions/" + encodeURIComponent(id));
   const sel = new Set();            // "clip|version" marcadas para exportar
@@ -323,11 +436,11 @@ async function viewSession(view, id) {
       const conf = c.confidence;
       holder.replaceChildren(el("div", {}, video),
         el("div", {}, el("h3", { style: "margin-top:0" }, c.name + " · momento #" + c.rank, el("span", { class: "mut small" }, "  puntuación " + c.score + " (ranking heurístico, no una predicción)")),
-          el("div", { class: "mut small" }, "Tramo del video: " + mm(v.start) + " – " + mm(v.end) + " (" + v.duration + " s) · " + v.label),
+          el("div", { class: "mut small" }, "Tramo del video: " + mm(v.start) + " – " + mm(v.end) + " (" + v.duration + " s) · " + v.label + (sess.segment ? " · en el VOD completo: " + hms(sess.segment.start + v.start) + "–" + hms(sess.segment.start + v.end) : "")),
           el("div", { class: "rate" }, ...Object.entries(D.labels).map(([k, label]) => el("button", { class: k + (rt.rating === k ? " on" : ""), onclick: rate(rt.rating === k ? null : k) }, label))),
           note,
           el("div", { class: "row", style: "margin-top:8px" },
-            el("button", { class: "fix", onclick: () => openEditor(D, c, v, () => viewSession($("#view"), id)) }, "Editar inicio, final y subtítulos"),
+            el("button", { class: "fix", onclick: () => openEditor(D, c, v, refresh) }, "Editar inicio, final y subtítulos"),
             el("a", { href: dl("mp4"), class: "fix" }, el("button", { type: "button" }, "Descargar MP4")), el("a", { href: dl("srt"), class: "fix" }, el("button", { type: "button" }, "Descargar SRT")),
             el("label", { class: "fix", style: "display:flex;gap:6px;align-items:center;margin:0" }, el("input", { type: "checkbox", style: "width:auto", checked: sel.has(key), onchange: (ev) => { if (ev.target.checked) sel.add(key); else sel.delete(key); } }), "Exportar")),
           (v.issues || []).length ? el("details", { open: true }, el("summary", {}, (v.issues.length) + " aviso(s) de esta versión"), ...v.issues.slice(0, 8).map((x) => el("div", { class: "small warn" }, "⚠ " + x))) : null,
@@ -341,7 +454,7 @@ async function viewSession(view, id) {
     return el("div", { class: "card" }, el("div", { class: "row" }, el("strong", {}, c.name), el("span", { class: "fix mut small" }, "Versión mostrada:"), el("div", { class: "fix" }, vsel)), holder);
   }
   list.replaceChildren(...(D.clips.length ? D.clips.map(clipCard) : [el("div", { class: "card mut" }, sess.status === "completed" ? "No se encontraron momentos que superen el umbral: no se generaron clips." : "Esta sesión no tiene clips (" + (STATUS[sess.status] || sess.status) + ").")]));
-  view.replaceChildren(head, list);
+  return el("div", { style: "display:grid;gap:14px" }, head, list);
 }
 
 /* ---------- editor ---------- */

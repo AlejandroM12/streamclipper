@@ -10,6 +10,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +22,7 @@ from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
 from streamclipper.core.errors import CancelledError, InvalidInputError, MediaError
 from streamclipper.core.log import log_event
+from streamclipper.core.memory import register_child, unregister_child
 from streamclipper.media.ffmpeg import probe
 
 ALLOWED_HOSTS = frozenset({"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"})
@@ -34,6 +37,10 @@ _KICK_CHANNEL = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 _KICK_VOD_ID = re.compile(r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 _KICK_CLIP_ID = re.compile(r"^clip_[A-Za-z0-9_-]{5,60}$")
 _MAX_URL_LEN = 300
+MAX_SEGMENTS = 5          # tramos por VOD (controla el consumo de disco, CPU y tiempo)
+MIN_SEGMENT_S = 10
+_HMS = re.compile(r"^(\d{1,3}):([0-5]\d):([0-5]\d)$")
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _BLOCKED_AVAILABILITY = {
     "private": "es privado",
     "premium_only": "es solo para suscriptores Premium",
@@ -88,6 +95,8 @@ class DownloadResult:
     dry_run: bool = False
     warnings: list[str] = field(default_factory=list)
     platform: str = "youtube"
+    start: int | None = None        # solo en tramos de VOD
+    end: int | None = None
 
 
 # --- validación de la URL ----------------------------------------------------------------------
@@ -239,8 +248,10 @@ def _ref(video_id: str, kind: str, has_list: bool) -> VideoRef:
 
 
 # --- validación de la metadata (antes de descargar) --------------------------------------------
-def check_info(info: dict, limits: DownloadLimits) -> int | None:
-    """Rechaza videos no aptos. Devuelve el tamaño estimado en bytes, o None si no se conoce."""
+def check_info(info: dict, limits: DownloadLimits, segmented: bool = False) -> int | None:
+    """Rechaza videos no aptos. Devuelve el tamaño estimado en bytes, o None si no se conoce.
+    `segmented`: se descargarán solo tramos (VOD de Twitch/Kick), así que ni la duración total ni el tamaño total
+    se comparan con los límites (cada tramo se valida aparte); la duración total sí debe conocerse."""
     if info.get("_type") == "playlist" or info.get("entries") is not None:
         raise InvalidInputError("La URL corresponde a una lista de reproducción, no a un único video")
     if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming", "post_live"):
@@ -251,6 +262,8 @@ def check_info(info: dict, limits: DownloadLimits) -> int | None:
     duration = info.get("duration")
     if not duration:
         raise InvalidInputError("No se pudo determinar la duración del video; se rechaza por seguridad")
+    if segmented:
+        return None
     if duration > limits.max_duration_s:
         raise InvalidInputError(
             f"El video dura {duration / 60:.1f} min; el máximo permitido es {limits.max_duration_s / 60:.0f} min")
@@ -394,7 +407,12 @@ def download_media(
         progress("consultando metadata")
         with ydl_factory(opts) as ydl:
             info = ydl.extract_info(ref.canonical_url, download=False)
-            estimated = check_info(info, limits)
+            try:
+                estimated = check_info(info, limits)
+            except InvalidInputError as e:
+                if is_segmentable(ref) and "máximo permitido es" in str(e):
+                    raise InvalidInputError(f"{e}. Elegí uno o varios tramos del VOD (hasta {limits.max_duration_s / 60:.0f} min cada uno).") from None
+                raise
             meta = DownloadResult(final, ref.video_id, title=info.get("title"), duration=info.get("duration"),
                                   estimated_bytes=estimated, license=info.get("license"),
                                   dry_run=dry_run, warnings=warnings, platform=ref.platform)
@@ -465,7 +483,9 @@ def inspect_media(url: str, limits: DownloadLimits | None = None, ydl_factory: C
     ref = parse_media_url(url)           # una URL inválida o de otro dominio lanza InvalidInputError: nunca llega a la red
     out = {"platform": ref.platform, "platform_label": ref.label, "kind": ref.kind, "kind_label": ref.kind_label,
            "video_id": ref.video_id, "canonical_url": ref.canonical_url, "title": None, "duration": None, "uploader": None,
-           "estimated_mb": None, "acceptable": False, "reason": None, "warnings": []}
+           "estimated_mb": None, "acceptable": False, "reason": None, "warnings": [],
+           "segmentable": False, "max_segments": MAX_SEGMENTS, "max_segment_s": int(limits.max_duration_s),
+           "min_segment_s": MIN_SEGMENT_S}
     if ref.ignored_playlist:
         out["warnings"].append("La URL incluía una lista o colección: se ignora y se procesa solo el video indicado")
     opts = {"format": _format_selector(limits.max_height), "noplaylist": True, "quiet": True, "no_warnings": True,
@@ -478,9 +498,238 @@ def inspect_media(url: str, limits: DownloadLimits | None = None, ydl_factory: C
         return out
     out.update(title=info.get("title"), duration=info.get("duration"), uploader=info.get("uploader") or info.get("channel"))
     try:
-        est = check_info(info, limits)
+        out["segmentable"] = is_segmentable(ref)
+        est = check_info(info, limits, segmented=out["segmentable"])
         out["estimated_mb"] = round(est / 1e6) if est else None
         out["acceptable"] = True
     except InvalidInputError as e:
         out["reason"] = str(e)
     return out
+
+
+# --- VOD por tramos ----------------------------------------------------------------------------
+def is_segmentable(ref: VideoRef) -> bool:
+    """Solo los VOD de Twitch y Kick se descargan por tramos (los clips y YouTube se descargan enteros)."""
+    return ref.platform in ("twitch", "kick") and ref.kind == "vod"
+
+
+def parse_hms(value) -> int:
+    """'HH:MM:SS' (o un número de segundos) -> segundos. Lanza InvalidInputError si no es una hora válida."""
+    if isinstance(value, bool):
+        raise InvalidInputError("Hora inválida")
+    if isinstance(value, (int, float)):
+        if value < 0 or value != int(value):
+            raise InvalidInputError("Hora inválida")
+        return int(value)
+    m = _HMS.match(str(value or "").strip())
+    if not m:
+        raise InvalidInputError(f"Hora inválida: '{value}'. Usá el formato HH:MM:SS (por ejemplo 01:25:00)")
+    return int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3])
+
+
+def format_hms(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+def validate_segments(raw, duration: float | None, limits: DownloadLimits | None = None) -> list[tuple[int, int]]:
+    """Valida los tramos elegidos y los devuelve ordenados como (inicio, fin) en segundos.
+    Reglas: de 1 a MAX_SEGMENTS tramos; dentro de la duración total; entre MIN_SEGMENT_S y el máximo por tramo; sin
+    superposición (que un tramo termine donde empieza el siguiente es válido)."""
+    limits = limits or DownloadLimits()
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raise InvalidInputError("Elegí al menos un tramo del VOD")
+    if len(raw) > MAX_SEGMENTS:
+        raise InvalidInputError(f"Se pueden elegir hasta {MAX_SEGMENTS} tramos por VOD")
+    parsed = []
+    for i, seg in enumerate(raw, 1):
+        label = f"Tramo {i}"
+        try:
+            if isinstance(seg, dict):
+                if seg.get("start") in (None, "") or seg.get("end") in (None, ""):
+                    raise InvalidInputError(f"{label}: faltan el inicio y el final") from None
+                start, end = parse_hms(seg.get("start")), parse_hms(seg.get("end"))
+            else:
+                start, end = parse_hms(seg[0]), parse_hms(seg[1])
+        except (InvalidInputError, TypeError, IndexError, KeyError) as e:
+            raise InvalidInputError(f"{label}: {e}" if isinstance(e, InvalidInputError) else f"{label}: faltan el inicio y el final") from None
+        if end <= start:
+            raise InvalidInputError(f"{label}: el final ({format_hms(end)}) debe ser posterior al inicio ({format_hms(start)})")
+        length = end - start
+        if length < MIN_SEGMENT_S:
+            raise InvalidInputError(f"{label}: dura {length} s; el mínimo es {MIN_SEGMENT_S} s")
+        if length > limits.max_duration_s:
+            raise InvalidInputError(f"{label}: dura {format_hms(length)}; el máximo por tramo es {limits.max_duration_s / 60:.0f} min")
+        if duration is not None and end > int(duration):
+            raise InvalidInputError(f"{label}: termina en {format_hms(end)} pero el VOD dura {format_hms(duration)}")
+        parsed.append((start, end, i))
+    parsed.sort()
+    for (s1, e1, i1), (s2, e2, i2) in zip(parsed, parsed[1:]):
+        if s2 < e1:
+            raise InvalidInputError(f"Los tramos {i1} ({format_hms(s1)}–{format_hms(e1)}) y {i2} ({format_hms(s2)}–{format_hms(e2)}) se superponen")
+    return [(s_, e_) for s_, e_, _ in parsed]
+
+
+def segment_target(settings: Settings, ref: VideoRef, start: int, end: int) -> Path:
+    tag = f"{format_hms(start).replace(':', '')}-{format_hms(end).replace(':', '')}"
+    return samples_dir(settings) / f"{ref.file_prefix}-{ref.video_id}_{tag}.mp4"
+
+
+def _run_ffmpeg_cut(cmd: list, duration: float, cancel: CancelToken, progress: Callable[[str], None]) -> str:
+    """Ejecuta FFmpeg informando el avance real (-progress). Cancelar o fallar mata el proceso; sin avance durante
+    3 minutos se considera bloqueado. Devuelve el final de stderr."""
+    proc = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
+    register_child(proc.pid)
+    state = {"t": 0.0, "last": time.monotonic(), "pct": -10.0, "err": ""}
+
+    def read_progress():
+        for line in proc.stdout:
+            k, _, v = line.strip().partition("=")
+            if k in ("out_time_us", "out_time_ms") and v.lstrip("-").isdigit():
+                t = int(v) / 1e6
+                if t > state["t"]:
+                    state["t"], state["last"] = t, time.monotonic()
+                    pct = min(100.0, t / duration * 100)
+                    if pct - state["pct"] >= 5:
+                        state["pct"] = pct
+                        progress(f"descargando {pct:.0f}% del tramo")
+
+    def read_err():
+        state["err"] = proc.stderr.read()[-1500:]
+
+    threads = [threading.Thread(target=read_progress, daemon=True), threading.Thread(target=read_err, daemon=True)]
+    for t in threads:
+        t.start()
+    try:
+        while True:
+            try:
+                code = proc.wait(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                if cancel.cancelled:
+                    raise CancelledError("Descarga cancelada") from None
+                if time.monotonic() - state["last"] > 180:
+                    raise MediaError("La descarga del tramo se quedó sin avance durante 3 minutos") from None
+    finally:
+        unregister_child(proc.pid)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    for t in threads:
+        t.join(timeout=2)
+    if code != 0:
+        raise MediaError(f"FFmpeg no pudo descargar el tramo: {state['err'].strip()[-300:] or f'código {code}'}")
+    return state["err"]
+
+
+def download_segment(
+    url: str,
+    start: int,
+    end: int,
+    settings: Settings,
+    limits: DownloadLimits | None = None,
+    *,
+    on_exists: str = "reuse",          # reuse | overwrite
+    cancel: CancelToken | None = None,
+    progress: Callable[[str], None] | None = None,
+    ydl_factory: Callable[[dict], object] | None = None,
+) -> DownloadResult:
+    """Descarga SOLO el rango [start, end] (segundos) de un VOD de Twitch o Kick.
+
+    yt-dlp resuelve el flujo HLS (sin cuentas ni cookies) y FFmpeg descarga únicamente ese rango con `-ss/-t` y copia de
+    flujos (sin recodificar). Nunca se descarga el VOD completo: si FFmpeg no puede cortar el tramo, se informa el error.
+    Con copia de flujos el corte comienza en el segmento/keyframe anterior al inicio pedido (unos segundos antes como
+    máximo); la duración real queda registrada en el .source.json y se verifica con FFprobe."""
+    limits = limits or DownloadLimits()
+    cancel = cancel or CancelToken()
+    progress = progress or (lambda _m: None)
+    ref = parse_media_url(url)
+    if not is_segmentable(ref):
+        raise InvalidInputError("Los tramos solo se pueden descargar de un VOD de Twitch o Kick")
+    validate_segments([(start, end)], None, limits)
+    length = end - start
+    final = segment_target(settings, ref, start, end)
+    if final.exists() and on_exists == "reuse":
+        info = probe(final, settings.ffprobe)
+        return DownloadResult(final, ref.video_id, duration=info.duration, size_bytes=info.size_bytes, reused=True,
+                              platform=ref.platform, start=start, end=end)
+    tmp = samples_dir(settings) / f".downloading-{final.stem}"
+    opts = {"format": _format_selector(limits.max_height), "noplaylist": True, "quiet": True, "no_warnings": True,
+            "socket_timeout": 30, "retries": 3, "ignoreconfig": True, "usenetrc": False, "skip_download": True}
+    try:
+        progress("consultando metadata")
+        try:
+            with (ydl_factory or _default_factory)(opts) as ydl:
+                info = ydl.extract_info(ref.canonical_url, download=False)
+        except Exception as e:
+            if cancel.cancelled:
+                raise CancelledError("Descarga cancelada") from e
+            raise MediaError(explain_download_error(str(e))) from e
+        check_info(info, limits, segmented=True)
+        if end > int(info["duration"]):
+            raise InvalidInputError(f"El tramo termina en {format_hms(end)} pero el VOD dura {format_hms(info['duration'])}")
+        fmts = info.get("requested_formats") or [info]
+        if not all(f.get("url") for f in fmts):
+            raise MediaError("No se pudo obtener el flujo de video para descargar el tramo; no se descarga el VOD completo")
+        rates = [f.get("tbr") for f in fmts]
+        if rates and all(rates) and sum(rates) * 125 * length > limits.max_bytes:
+            raise InvalidInputError(f"El tramo pesaría unos {sum(rates) * 125 * length / 1e6:.0f} MB; el máximo permitido es "
+                                    f"{limits.max_bytes / 1e6:.0f} MB. Elegí un tramo más corto")
+        cmd = [settings.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-progress", "pipe:1", "-nostats"]
+        for f in fmts:   # un -ss/-t por entrada: FFmpeg solo lee los segmentos de ese rango
+            if str(f["url"]).startswith("http"):
+                headers = "".join(f"{k}: {v}\r\n" for k, v in (f.get("http_headers") or info.get("http_headers") or {}).items())
+                if headers:
+                    cmd += ["-headers", headers]
+                cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5", "-rw_timeout", "30000000"]
+            cmd += ["-ss", str(start), "-t", str(length), "-i", f["url"]]
+        if len(fmts) == 2:
+            cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+        else:
+            cmd += ["-map", "0:v:0", "-map", "0:a:0"]
+        samples_dir(settings).mkdir(parents=True, exist_ok=True)
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir()
+        out = tmp / "segment.mp4"
+        cmd += ["-c", "copy", "-t", str(length), "-movflags", "+faststart", out]
+        progress(f"descargando el tramo {format_hms(start)}–{format_hms(end)} de '{info.get('title')}'")
+        _run_ffmpeg_cut(cmd, length, cancel, progress)
+        cancel.check()
+        if not out.is_file():
+            raise MediaError("No se generó el MP4 del tramo")
+        size = out.stat().st_size
+        if size > limits.max_bytes:
+            raise MediaError(f"El tramo descargado pesa {size / 1e6:.0f} MB y supera el máximo permitido")
+        info_f = probe(out, settings.ffprobe)   # FFprobe valida que haya video y que la duración sea la pedida
+        if not info_f.has_audio:
+            raise MediaError("El tramo descargado no tiene pista de audio")
+        if info_f.duration < length - 5:
+            raise MediaError(f"El tramo dura {info_f.duration:.0f} s en lugar de los {length} s pedidos")
+        if info_f.duration > length + 15:
+            raise MediaError(f"El tramo dura {info_f.duration:.0f} s, mucho más de los {length} s pedidos; se descarta")
+        if final.exists() and on_exists != "overwrite":
+            raise InvalidInputError(f"{final} apareció mientras se descargaba; no se sobrescribe")
+        os.replace(out, final)
+        res = DownloadResult(final, ref.video_id, title=info.get("title"), duration=info_f.duration, size_bytes=info_f.size_bytes,
+                             platform=ref.platform, start=start, end=end)
+        _write_segment_sidecar(final, ref, info, start, end, info_f.duration, info_f.size_bytes)
+        log_event("download_segment_ok", platform=ref.platform, video_id=ref.video_id, start=start, end=end,
+                  measured=round(info_f.duration, 2), bytes=info_f.size_bytes)
+        return res
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _write_segment_sidecar(final: Path, ref: VideoRef, info: dict, start: int, end: int, measured: float, size: int) -> None:
+    data = {
+        "source_url": ref.canonical_url, "platform": ref.platform, "kind": "vod-segment", "video_id": ref.video_id,
+        "title": f"{info.get('title')} [{format_hms(start)}–{format_hms(end)}]", "vod_title": info.get("title"),
+        "uploader": info.get("uploader"), "vod_duration_s": info.get("duration"), "segment_start_s": start, "segment_end_s": end,
+        "requested_duration_s": end - start, "measured_duration_s": round(measured, 2),
+        "extra_seconds": round(max(0.0, measured - (end - start)), 2), "size_bytes": size,
+        "downloaded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "note": "Tramo descargado con yt-dlp + FFmpeg (copia de flujos) para uso personal; el usuario es responsable de contar con autorización.",
+    }
+    final.with_suffix(".source.json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")

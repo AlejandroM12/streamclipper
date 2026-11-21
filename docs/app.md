@@ -35,16 +35,46 @@ Opciones del `.bat`: `--no-open` (no abre el navegador), `--port 8781`.
 6. **Sesiones**: historial de todo lo procesado (también por la CLI). Si cerrás la aplicación en medio de un trabajo, al
    volver aparece como *Interrumpido* y se puede reintentar.
 
+## VOD de Twitch y Kick por tramos
+
+Un VOD suele durar horas, así que no se descarga entero: se eligen **uno o varios tramos** y solo esos se descargan y procesan.
+
+1. En *Nuevo*, pegá la URL del VOD (`twitch.tv/videos/<id>` o `kick.com/<canal>/videos/<id>`). Se muestran plataforma,
+   título y duración total, y aparece el editor de **Tramos a procesar**.
+2. Cargá cada tramo como `HH:MM:SS` → `HH:MM:SS` (por ejemplo `01:25:00` → `01:40:00`). Con *+ Agregar tramo* y ✕ se agregan y
+   quitan. La página muestra la duración de cada tramo y el tiempo total seleccionado, y no deja procesar si hay errores.
+3. Reglas (se validan también en el servidor): hasta **5 tramos** por VOD, de **10 s a 20 min** cada uno, dentro de la duración
+   del VOD, sin superponerse (que uno termine donde empieza el siguiente es válido). *Usar todo el VOD* aparece si dura ≤ 20 min.
+4. **Procesar**: es **un solo trabajo** que recorre los tramos **uno detrás de otro** (un único proceso pesado a la vez).
+   Cada tramo muestra su propio progreso (descarga, transcripción, render…) y termina en **su propia sesión** con sus clips,
+   valoración, edición y exportación de siempre. Valores recomendados: Whisper `small`, español, blur-fit, 3 clips por tramo.
+5. **Ver los clips de todos los tramos** abre una vista agrupada del VOD (`#/vod/<id>`); en *Sesiones* los tramos de un VOD
+   aparecen juntos en una sola tarjeta. Cada sesión guarda un `segment.json` con la URL original, el VOD y el rango
+   (inicio/fin), de modo que la relación VOD → tramo → clips no depende de la interfaz.
+6. **Cancelar** detiene el tramo en curso (FFmpeg se mata en menos de un segundo) y conserva los tramos terminados. Si se
+   cierra la aplicación, al volver el trabajo figura *Interrumpido* y **Continuar con los tramos pendientes y fallidos** no
+   repite los tramos ya terminados. Un tramo que falla no frena a los demás; el botón reintenta solo los fallidos.
+7. No se admiten dos trabajos idénticos (mismo VOD, mismos tramos y misma configuración) a la vez.
+
+**Cómo se descarga un tramo:** yt-dlp resuelve el flujo HLS del VOD (sin cuentas ni cookies) y FFmpeg descarga *solo ese rango*
+(`-ss <inicio> -t <duración>` sobre la entrada, copiando los flujos sin recodificar). No existe una descarga previa del VOD
+completo y, si el corte falla, se informa el error: nunca se recurre en silencio a descargar el VOD entero. Como la copia de
+flujos arranca en el segmento/keyframe de HLS, **el tramo puede incluir unos segundos adicionales**: en las pruebas reales
+fueron de 0,05 a 0,13 s sobre 40 s (Twitch 720p, Kick 1080p60), pero en un VOD con keyframes más separados pueden ser algunos
+segundos. La duración real se mide con FFprobe (que además exige video y audio y rechaza duraciones muy distintas de la
+pedida) y queda en `data\samples\<archivo>.source.json` (`measured_duration_s`, `extra_seconds`). Los tramos se guardan como
+`data\samples\<plataforma>-vod-<id>_<HHMMSS>-<HHMMSS>.mp4`.
+
 ## Seguridad y límites
 
 - Escucha solo en loopback; se rechaza cualquier `Host` que no sea local y las escrituras exigen JSON.
 - URLs: la plataforma se detecta por el dominio exacto (YouTube, Twitch o Kick) y antes de procesar se muestra título,
   duración y plataforma. Solo videos públicos de un único video, VOD o clip: se rechazan listas, colecciones, canales,
-  directos y dominios parecidos (`twitch.tv.evil.com`, etc.). Límites: 20 min, 1500 MB y 1080p. No se piden ni guardan
+  directos y dominios parecidos (`twitch.tv.evil.com`, etc.). Límites: 20 min (por video, clip o tramo), 1500 MB y 1080p. No se piden ni guardan
   cuentas, contraseñas ni cookies: el contenido de suscriptores o que exige iniciar sesión se informa y se rechaza.
   Usá contenido propio o con autorización.
-- **Los VOD de Twitch y Kick casi siempre duran horas** (en las pruebas, el más corto medía 64 min), así que con el límite
-  de 20 min se reconocen y se muestran pero se rechazan. Los clips (hasta ~60 s) no tienen ese problema.
+- **Los VOD de Twitch y Kick casi siempre duran horas** (en las pruebas, el más corto medía 64 min): se procesan por tramos
+  (ver arriba). Los clips (hasta ~60 s) y YouTube se descargan enteros como siempre.
 - La puntuación de los clips es un ranking heurístico: **nada se considera publicable sin revisión humana**.
 - Edición: mínimo 3 s y máximo 60 s por clip. No es un editor de video completo.
 

@@ -218,8 +218,18 @@ def test_inspect_returns_platform_title_duration_and_acceptance(good_mp4):
 
 
 def test_inspect_reports_why_a_valid_url_cannot_be_processed(good_mp4):
-    r = inspect_media(f"https://www.twitch.tv/videos/{TW_VOD}", ydl_factory=fake(good_mp4, {**HLS_INFO, "duration": 17208}))
-    assert r["acceptable"] is False and r["title"] == "Mi clip" and "20 min" in r["reason"]
+    r = inspect_media(f"https://www.youtube.com/watch?v={YT}", ydl_factory=fake(good_mp4, {**HLS_INFO, "duration": 17208}))
+    assert r["acceptable"] is False and r["title"] == "Mi clip" and "20 min" in r["reason"] and not r["segmentable"]
+
+
+def test_long_twitch_and_kick_vods_are_segmentable_instead_of_rejected(good_mp4):
+    for url in (f"https://www.twitch.tv/videos/{TW_VOD}", f"https://kick.com/xqc/videos/{K_VOD}"):
+        r = inspect_media(url, ydl_factory=fake(good_mp4, {**HLS_INFO, "duration": 17208}))
+        assert r["acceptable"] and r["segmentable"] and r["duration"] == 17208 and r["reason"] is None
+        assert (r["max_segments"], r["max_segment_s"]) == (5, 1200)
+    # los clips siguen igual (no segmentables) y un VOD sin duración conocida sí se rechaza
+    assert not inspect_media(f"https://clips.twitch.tv/{TW_CLIP}", ydl_factory=fake(good_mp4, HLS_INFO))["segmentable"]
+    assert not inspect_media(f"https://www.twitch.tv/videos/{TW_VOD}", ydl_factory=fake(good_mp4, {**HLS_INFO, "duration": None}))["acceptable"]
 
 
 def test_inspect_translates_platform_errors():

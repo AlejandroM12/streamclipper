@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from streamclipper import __version__
 from streamclipper.app.manager import LANGUAGES, LAYOUTS, MODELS, JobManager
 from streamclipper.app.runners import session_dir
-from streamclipper.app.sessions import list_sessions, rating_item, session_detail
+from streamclipper.app.sessions import group_detail, list_sessions, rating_item, session_detail
 from streamclipper.core.config import Settings
 from streamclipper.core.errors import InvalidInputError, StreamClipperError
 from streamclipper.doctor import model_cached, run_doctor
@@ -69,7 +69,8 @@ class AppContext:
         return res
 
     def active_sessions(self) -> set[str]:
-        return {j["session"] for j in self.manager.active() if j.get("session")}
+        return ({j["session"] for j in self.manager.active() if j.get("session")}
+                | {sg["session"] for j in self.manager.active() for sg in j.get("segments", []) if sg.get("session")})
 
     def session(self, name: str) -> Path:
         try:
@@ -134,6 +135,8 @@ def make_handler(ctx: AppContext):
                     return send_json(self, ctx.manager.get(m.group(1)))
                 if path == "/api/sessions":
                     return send_json(self, {"sessions": list_sessions(s, ctx.active_sessions())})
+                if m := re.fullmatch(r"/api/groups/([\w-]+)", path):
+                    return send_json(self, group_detail(s, m.group(1), ctx.active_sessions()))
                 if m := re.fullmatch(r"/api/sessions/([\w.-]+)", path):
                     ctx.session(m.group(1))
                     return send_json(self, session_detail(s, m.group(1), ctx.active_sessions()))
@@ -150,6 +153,9 @@ def make_handler(ctx: AppContext):
                 raise ApiError(404, "no encontrado")
             # POST
             body = read_json_body(self)
+            if path == "/api/jobs" and body.get("segments") is not None:
+                job = ctx.manager.submit_vod(body.get("source", ""), body["segments"], body.get("params") or {}, bool(body.get("force")))
+                return send_json(self, job.to_dict(), 201)
             if path == "/api/jobs":
                 job = ctx.manager.submit_process(body.get("source", ""), body.get("params") or {}, bool(body.get("force")))
                 return send_json(self, job.to_dict(), 201)

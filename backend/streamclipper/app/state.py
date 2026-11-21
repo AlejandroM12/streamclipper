@@ -23,6 +23,7 @@ STAGE_LABELS = {
 }
 PROCESS_STAGES = ["validar", "extraer_audio", "transcribir", "analizar_audio", "seleccionar", "renderizar", "verificar"]
 EDIT_STAGES = ["preparar", "renderizar", "verificar"]
+SEGMENT_STAGES = ["descarga"] + PROCESS_STAGES
 
 
 @dataclass
@@ -37,9 +38,35 @@ class Stage:
 
 
 @dataclass
+class Segment:
+    """Un tramo de un VOD: se descarga solo ese rango y se procesa como una sesión propia del pipeline."""
+    index: int
+    start: int                        # segundos desde el inicio del VOD
+    end: int
+    status: str = "pending"           # pending | running | done | failed | cancelled
+    stages: list[dict] = field(default_factory=list)
+    session: str | None = None        # sesión (data/jobs/<session>) creada para este tramo
+    message: str = ""
+    error: str | None = None
+    hint: str | None = None
+    warnings: list[str] = field(default_factory=list)
+    started_at: float | None = None
+    finished_at: float | None = None
+    result: dict = field(default_factory=dict)
+
+    def stage(self, key: str) -> dict | None:
+        return next((s for s in self.stages if s["key"] == key), None)
+
+    def reset(self) -> None:
+        self.status, self.error, self.hint, self.message = "pending", None, None, ""
+        self.stages = make_stages(SEGMENT_STAGES)
+        self.started_at = self.finished_at = None
+
+
+@dataclass
 class AppJob:
     id: str
-    kind: str                         # process | edit
+    kind: str                         # process | edit | vod
     status: str = "queued"           # queued | running | completed | failed | cancelled | interrupted
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
@@ -57,6 +84,7 @@ class AppJob:
     warnings: list[str] = field(default_factory=list)
     dup_key: str = ""
     result: dict = field(default_factory=dict)
+    segments: list[Segment] = field(default_factory=list)   # solo en trabajos de tipo vod
 
     @staticmethod
     def new_id() -> str:
@@ -68,7 +96,10 @@ class AppJob:
     @classmethod
     def from_dict(cls, d: dict) -> "AppJob":
         known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in d.items() if k in known})
+        job = cls(**{k: v for k, v in d.items() if k in known and k != "segments"})
+        sk = {f for f in Segment.__dataclass_fields__}
+        job.segments = [Segment(**{k: v for k, v in s.items() if k in sk}) for s in d.get("segments", [])]
+        return job
 
     def stage(self, key: str) -> dict | None:
         return next((s for s in self.stages if s["key"] == key), None)
