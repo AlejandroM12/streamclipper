@@ -21,6 +21,7 @@ from streamclipper.media.ffmpeg import extract_audio, probe
 from streamclipper.render.clips import render_set
 from streamclipper.report import write_reports
 from streamclipper.selection.base import AnalysisContext, CandidateScorer
+from streamclipper.selection.context_clip import plan_windows
 from streamclipper.selection.refine import refine_selected
 from streamclipper.selection.selector import find_clips, is_eligible, selection_report
 from streamclipper.selection.smart import build_smart_scorer
@@ -240,7 +241,7 @@ def run_pipeline(
                 with stage("renderizar"):
                     names = [f"clip_{i:02d}" for i in range(1, len(chosen) + 1)]
                     # los límites se ajustan DESPUÉS de elegir: el ranking y las puntuaciones no cambian
-                    windows = dict(zip(names, refine_selected(chosen, ctx)))
+                    windows = dict(zip(names, plan_windows(chosen, ctx) if settings.clip_preset != "legacy" else refine_selected(chosen, ctx)))
                     result["clips"] = render_set(
                         src, list(zip(names, chosen)), transcript, settings, work, out_dir, cancel, progress, warnings,
                         refined=windows)

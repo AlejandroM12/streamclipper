@@ -193,7 +193,7 @@ function jobCard(j) {
   const box = el("div", { class: "job" },
     el("h3", {}, j.title || j.id, "  ", el("span", { class: "badge " + j.status }, STATUS[j.status] || j.status),
       j.status === "queued" && j.queue_position ? el("span", { class: "mut small" }, "  posición " + j.queue_position + " en la cola") : null),
-    el("div", { class: "mut small" }, (j.kind === "edit" ? "Edición · " : isVod ? (j.params.platform_name || "") + " VOD por tramos · " : "Procesamiento · ") + fdate(j.created_at) + (j.params && j.params.model ? " · Whisper " + j.params.model : "") + (j.params && j.params.detector ? " · Detección " + (DETECTOR[j.params.detector] || j.params.detector) : "")),
+    el("div", { class: "mut small" }, (j.kind === "edit" ? "Edición · " : isVod ? (j.params.platform_name || "") + " VOD por tramos · " : "Procesamiento · ") + fdate(j.created_at) + (j.params && j.params.model ? " · Whisper " + j.params.model : "") + (j.params && j.params.detector ? " · Detección " + (DETECTOR[j.params.detector] || j.params.detector) : "") + (j.params && j.params.clip_preset ? " · Clips " + ({ cortos: "cortos", tiktok: "TikTok/Reels", extendido: "extendidos" }[j.params.clip_preset] || j.params.clip_preset) : "")),
     el("div", { class: "stages" }, j.stages.map(stageRow)));
   if (isVod) {
     const done = j.segments.filter((x) => x.status === "done").length;
@@ -244,6 +244,9 @@ async function viewNew(view) {
     ? "Smart Highlights suma audio contextual, contexto de la transcripción y (opcional) imagen, y resta ruido, música y cortes pobres. Todavía NO está demostrado que supere a la clásica: revisá y valorá los clips."
     : "Clásica: el ranking original (audio, reacción verbal, frases y calidad de transcripción). Es la referencia con la que se compara Smart Highlights.";
   detector.addEventListener("change", drawDet); drawDet();
+  const clipPreset = el("select", {});
+  for (const cp of (CONFIG.clip_presets || [])) clipPreset.append(el("option", { value: cp.id, selected: cp.id === (D.clip_preset || "tiktok") }, cp.label));
+  const presetInfo = el("div", { class: "mut small" }, "Orienta dónde empieza y termina cada clip (según pausas y contexto); no fuerza una duración fija.");
   const clips = el("input", { type: "number", min: 1, max: 6, value: D.max_clips });
   for (const l of CONFIG.languages) lang.append(el("option", { value: l, selected: l === D.language }, { es: "Español", en: "Inglés", auto: "Detectar automáticamente" }[l] || l));
   for (const m of CONFIG.models) model.append(el("option", { value: m.id, selected: m.id === D.model }, m.label + (m.cached ? "" : " — se descarga la primera vez")));
@@ -401,7 +404,7 @@ async function viewNew(view) {
     go.disabled = true;
     const segs = kind === "url" && segInfo && modeSel.value === "segments" ? segRows.map((r) => ({ start: r.start.trim(), end: r.end.trim() })) : null;
     const autoReq = kind === "url" && lastInfo && modeSel.value === "auto" && lastInfo.auto && lastInfo.auto.available ? { target: Number(targetSel.value), explore: exploreChk.checked } : null;
-    const params = { model: model.value, language: lang.value, layout: layout.value, max_clips: Number(clips.value), platform: platform.value, detector: detector.value, smart_visual: visual.checked };
+    const params = { model: model.value, language: lang.value, layout: layout.value, max_clips: Number(clips.value), platform: platform.value, detector: detector.value, smart_visual: visual.checked, clip_preset: clipPreset.value };
     try {
       await api("/api/jobs", { source: kind === "url" ? url.value : path.value, params, force: !!force, ...(segs ? { segments: segs } : {}), ...(autoReq ? { auto: autoReq } : {}) });
       toast(autoReq ? "Transmisión agregada. El progreso por bloque aparece abajo." : "Trabajo agregado. El progreso aparece abajo.");
@@ -422,7 +425,8 @@ async function viewNew(view) {
     el("div", { class: "card" }, el("h2", {}, "Nuevo video"), el("div", { class: "seg" }, segBtns), urlBox, fileBox,
       el("div", { class: "row" }, el("div", {}, el("label", {}, "Idioma hablado"), lang), el("div", {}, el("label", {}, "Modelo Whisper"), model),
         el("div", {}, el("label", {}, "Cantidad de clips"), clips), el("div", {}, el("label", {}, "Presentación"), layout)),
-      el("div", { class: "row" }, el("div", {}, el("label", {}, "Detección de momentos"), detector, detInfo)),
+      el("div", { class: "row" }, el("div", {}, el("label", {}, "Detección de momentos"), detector, detInfo),
+        el("div", {}, el("label", {}, "Duración de los clips"), clipPreset, presetInfo)),
       el("details", {}, el("summary", {}, "Opciones avanzadas"), el("label", {}, "Márgenes seguros de la plataforma"), platform,
         el("label", { style: "display:flex;gap:8px;align-items:center" }, visual, "Smart Highlights: análisis visual ligero (muestreo limitado de fotogramas)")),
       el("div", { id: "formmsg" }), el("div", { class: "row", style: "margin-top:12px" }, go)),
@@ -534,6 +538,20 @@ async function viewGroup(view, gid) {
   }
   view.replaceChildren(...parts);
 }
+const KIND_ES = { pausa: "pausa natural", material: "borde del material", limite: "tope de contexto", calma: "calma del audio", estimacion: "estimación", sinhabla: "sin habla" };
+const CONF_ES = { alta: "confianza alta", media: "confianza media", baja: "confianza baja" };
+function ctxLine(c, v, sess) {
+  const x = v.kind === "original" ? c.context : v.context_note;
+  const dur = "Duración final " + v.duration + " s";
+  const vod = sess.segment && sess.segment.start != null && v.kind === "original" ? " · en el stream: " + hms(sess.segment.start) + "–" + hms(sess.segment.end) : "";
+  if (!x) return el("div", { class: "small" }, dur + vod + (v.kind === "original" ? " · recorte ajustado a la reacción (sin contexto automático)" : v.with_context ? " · con contexto" : ""));
+  return el("div", { class: "small" }, el("strong", {}, dur + vod), " · " + (x.estimated ? "expansión de respaldo (estimación)" : "contexto automático") + " · " + (CONF_ES[x.confidence] || x.confidence),
+    el("details", {}, el("summary", {}, "Por qué este recorte"),
+      el("div", { class: "small mut" }, "Intervalo original del candidato: " + x.original[0] + "–" + x.original[1] + " s · momento principal: " + x.event[0] + "–" + x.event[1] + " s · propuesto: " + x.contextual[0] + "–" + x.contextual[1] + " s · final: " + x.final[0] + "–" + x.final[1] + " s"),
+      el("div", { class: "small mut" }, "Inicio (" + (KIND_ES[x.start_kind] || x.start_kind) + "): " + x.start_reason), el("div", { class: "small mut" }, "Fin (" + (KIND_ES[x.end_kind] || x.end_kind) + "): " + x.end_reason),
+      ...(x.notes || []).map((n) => el("div", { class: "small mut" }, n)),
+      x.estimated ? el("div", { class: "small warn" }, "Parte de este recorte es una estimación conservadora: no hubo evidencia suficiente de dónde empieza o termina la situación.") : null));
+}
 async function buildSession(id, refresh, opts = {}) {
   if (!CONFIG) CONFIG = await loadConfig();
   const D = await api("/api/sessions/" + encodeURIComponent(id));
@@ -585,11 +603,13 @@ async function buildSession(id, refresh, opts = {}) {
       const conf = c.confidence;
       holder.replaceChildren(el("div", {}, video),
         el("div", {}, el("h3", { style: "margin-top:0" }, c.name + " · momento #" + c.rank, el("span", { class: "mut small" }, "  puntuación " + c.score + " (ranking heurístico, no una predicción)")),
+          ctxLine(c, v, sess),
           el("div", { class: "mut small" }, "Tramo del video: " + mm(v.start) + " – " + mm(v.end) + " (" + v.duration + " s) · " + v.label + (sess.segment ? " · en el VOD completo: " + hms(sess.segment.start + v.start) + "–" + hms(sess.segment.start + v.end) : "")),
           el("div", { class: "rate" }, ...Object.entries(D.labels).map(([k, label]) => el("button", { class: k + (rt.rating === k ? " on" : ""), onclick: rate(rt.rating === k ? null : k) }, label))),
           note,
           el("div", { class: "row", style: "margin-top:8px" },
             el("button", { class: "fix", onclick: () => openEditor(D, c, v, refresh) }, "Editar inicio, final y subtítulos"),
+            el("button", { class: "fix", title: "Busca el contexto anterior y posterior y propone un clip que se entienda solo; el original se conserva", onclick: () => openContext(D, c, v, refresh) }, "Ampliar con contexto"),
             el("a", { href: dl("mp4"), class: "fix" }, el("button", { type: "button" }, "Descargar MP4")), el("a", { href: dl("srt"), class: "fix" }, el("button", { type: "button" }, "Descargar SRT")),
             el("label", { class: "fix", style: "display:flex;gap:6px;align-items:center;margin:0" }, el("input", { type: "checkbox", style: "width:auto", checked: sel.has(key), onchange: (ev) => { if (ev.target.checked) sel.add(key); else sel.delete(key); } }), "Exportar")),
           (v.issues || []).length ? el("details", { open: true }, el("summary", {}, (v.issues.length) + " aviso(s) de esta versión"), ...v.issues.slice(0, 8).map((x) => el("div", { class: "small warn" }, "⚠ " + x))) : null,
@@ -667,6 +687,63 @@ async function viewAuto(view, id) {
     draw();
   }));
   draw();
+}
+
+/* ---------- ampliar con contexto ---------- */
+function openContext(D, clip, version, onDone) {
+  const id = D.session.id;
+  const presetSel = el("select", {}, ...(CONFIG.clip_presets || []).map((cp) => el("option", { value: cp.id, selected: cp.id === "tiktok" }, cp.label)));
+  const out = el("div", {}), vidBox = el("div", {});
+  const go = el("button", { class: "primary", onclick: search }, "Buscar contexto");
+  let prop = null, stopAt = null, vid = null;
+  async function waitJob(jobId, label) {
+    for (;;) {
+      const j = await api("/api/jobs/" + jobId);
+      out.replaceChildren(el("div", { class: "box" }, label + ": " + (j.message || STATUS[j.status] || j.status)));
+      if (j.status !== "queued" && j.status !== "running") return j;
+      await new Promise((r) => setTimeout(r, 1200));
+    }
+  }
+  async function search() {
+    go.disabled = true; vidBox.replaceChildren(); prop = null;
+    try {
+      const job = await api("/api/sessions/" + encodeURIComponent(id) + "/context", { clip: clip.name, preset: presetSel.value });
+      const j = await waitJob(job.id, "Buscando el contexto");
+      if (j.status !== "completed") { out.replaceChildren(el("div", { class: "box err" }, j.error || "No se pudo preparar el contexto.", j.hint ? el("div", { class: "mut" }, j.hint) : null)); go.disabled = false; return; }
+      prop = (await api("/api/sessions/" + encodeURIComponent(id) + "/context?clip=" + encodeURIComponent(clip.name))).proposal;
+      show();
+    } catch (e) { out.replaceChildren(el("div", { class: "box err" }, e.message)); }
+    go.disabled = false;
+  }
+  function show() {
+    const x = prop.context || {}, same = Math.abs(prop.duration - prop.original.duration) < 1;
+    const src = prop.source === "context" ? "/media/" + encodeURIComponent(id) + "/context/source.mp4" : "/source/" + encodeURIComponent(id);
+    vid = el("video", { controls: true, preload: "metadata", src: src + "#t=" + Math.max(0, prop.start) });
+    vid.addEventListener("timeupdate", () => { if (stopAt != null && vid.currentTime >= stopAt) { vid.pause(); stopAt = null; } });
+    const play = () => { vid.currentTime = prop.start; stopAt = prop.end; vid.play(); };
+    vidBox.replaceChildren(vid, el("div", { class: "row", style: "margin:8px 0" }, el("button", { class: "fix", onclick: play }, "▶ Ver la propuesta (" + prop.duration + " s)")));
+    out.replaceChildren(el("div", { class: "box" },
+      el("div", {}, el("strong", {}, "Original: "), prop.original.duration + " s  →  ", el("strong", {}, "propuesto: " + prop.duration + " s"), same ? "  (no hay más contexto que agregar)" : ""),
+      el("div", { class: "small mut" }, "Contexto: " + Math.max(0, (x.event ? x.event[0] - x.final[0] : 0)).toFixed(0) + " s antes y " + Math.max(0, (x.event ? x.final[1] - x.event[1] : 0)).toFixed(0) + " s después del momento principal · " + (CONF_ES[x.confidence] || "")),
+      el("div", { class: "small" }, "Inicio (" + (KIND_ES[x.start_kind] || x.start_kind) + "): " + x.start_reason), el("div", { class: "small" }, "Fin (" + (KIND_ES[x.end_kind] || x.end_kind) + "): " + x.end_reason),
+      x.estimated ? el("div", { class: "small warn" }, "⚠ Incluye una estimación conservadora (no hubo evidencia suficiente de un límite narrativo).") : null,
+      el("div", { class: "small mut" }, "El clip original y sus versiones se conservan; esto crea una versión nueva con subtítulos.")),
+      el("div", { class: "row" }, el("button", { class: "primary fix", onclick: confirmIt }, "Confirmar y regenerar"), el("button", { class: "fix", onclick: close }, "Cancelar")));
+  }
+  async function confirmIt() {
+    try {
+      const job = await api("/api/sessions/" + encodeURIComponent(id) + "/edit", { clip: clip.name, start: prop.start, end: prop.end, from_context: true });
+      const j = await waitJob(job.id, "Generando el clip con contexto");
+      if (j.status === "completed") { toast("Versión nueva creada. El original se conserva."); close(); onDone(); }
+      else out.replaceChildren(el("div", { class: "box err" }, j.error || "No se pudo regenerar el clip."));
+    } catch (e) { out.replaceChildren(el("div", { class: "box err" }, e.message)); }
+  }
+  const modal = el("div", { class: "modal" }, el("div", { class: "dlg" }, el("h2", {}, "Ampliar con contexto: " + clip.name),
+    el("div", { class: "mut small" }, "Busca lo que pasaba antes y después del momento (pausas, frases completas, calma del audio) y propone un clip que se entienda solo. No agrega segundos solo para llegar a una duración."),
+    el("div", { class: "row", style: "margin:8px 0" }, el("div", {}, el("label", {}, "Duración de los clips"), presetSel), el("div", { class: "fix" }, go)), vidBox, out));
+  function close() { if (vid) vid.pause(); modal.remove(); }
+  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+  document.body.append(modal);
 }
 
 /* ---------- editor ---------- */

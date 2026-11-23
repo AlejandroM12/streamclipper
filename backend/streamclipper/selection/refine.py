@@ -53,6 +53,7 @@ class Refined:
     fade_in: float = 0.0               # s de fade-in del audio (0 = sin fade)
     fade_out: float = 0.0
     bounds: tuple[float, float] | None = None   # (mínimo, máximo) de duración aplicados
+    context: dict | None = None        # construcción narrativa: intervalos, motivos y confianza (ver selection/context_clip.py)
 
 
 def _containing(segs: list[Segment], t: float) -> Segment | None:

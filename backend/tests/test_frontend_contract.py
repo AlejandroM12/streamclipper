@@ -278,3 +278,84 @@ def test_ui_auto_gallery_and_sessions_hide_analysis_sessions_and_group_final_cli
     assert "Stream largo" in text and "1 clip(s) final(es): 1 recomendados, 0 exploratorios · 1 bloque(s) analizados" in text
     assert text.count("Eliminar transmisión") == 1 and "v.mp4" in text                                          # la sesión antigua sigue visible, el análisis oculto
     assert "20261121-b0" not in text
+
+
+# --- clips con contexto: selector de duración y «Ampliar con contexto» -------------------------------------------------------------
+def _ctx_session(cfg: Settings, name: str) -> None:
+    """Sesión con un clip de 10 s ya construido y una propuesta de contexto preparada (como la dejaría el trabajo `context`)."""
+    d = cfg.jobs_dir / name
+    (d / "out").mkdir(parents=True)
+    (d / "context").mkdir()
+    info = {"preset": "tiktok", "original": [8.0, 24.0], "event": [10.0, 20.0], "contextual": [4.0, 41.0], "final": [3.6, 41.5], "start_kind": "pausa",
+            "end_kind": "pausa", "start_reason": "pausa natural de 6.0 s antes: ahí empieza la situación",
+            "end_reason": "pausa natural de 4.0 s después: la situación terminó", "confidence": "alta", "estimated": False, "exceptional": False,
+            "notes": ["contexto: 6 s antes y 21 s después del momento (10 s)"], "method": "transcripción + audio"}
+    comps = [{"name": n, "value": 0.5, "weight": 0.3, "contribution": 0.15, "note": "", "window": None, "evidence": []}
+             for n in ("intensidad_audio", "dinamica_audio", "reaccion_verbal", "frases", "contexto", "duracion", "calidad_transcripcion")]
+    (d / "result.json").write_text(json.dumps({
+        "job_id": name, "source": str(d / "v.mp4"), "status": "completed", "warnings": [], "selected": [1], "source_fingerprint": "x",
+        "settings": {"whisper_model": "small", "language": "es", "data_dir": str(cfg.data_dir)}, "media": {"duration": 120.0},
+        "candidates": [{"rank": 1, "start": 8, "end": 24, "anchor": 15, "score": 0.5, "triggers": [], "text": "x", "components": comps}],
+        "clips": [{"name": "clip_01", "rank": 1, "start": 10.0, "end": 20.0, "duration": 10.0, "score": 0.5, "file": str(d / "out" / "clip_01.mp4"),
+                   "selected_window": [8, 24], "context": None}]}))
+    (d / "transcript.json").write_text(json.dumps({"language": "es", "segments": [], "evidence_version": 2}))
+    (d / "context" / "proposal-clip_01.json").write_text(json.dumps({
+        "clip": "clip_01", "preset": "tiktok", "source": "own", "start": 3.6, "end": 41.5, "duration": 37.9, "original": {"start": 10.0, "end": 20.0, "duration": 10.0},
+        "context": info, "abs": None}))
+
+
+@needs_ui
+def test_ui_offers_the_three_duration_presets_with_tiktok_by_default_and_sends_the_choice(running, monkeypatch):
+    port, ctx, _ = running
+    short = dict(auto_info(300), segmentable=False, auto={"available": False})
+    monkeypatch.setattr(srv_mod, "inspect_media", lambda url, limits: short)
+    ctx.manager.runners["process"] = lambda j, c: threading.Event().wait(2)
+    sels = drive(f"http://127.0.0.1:{port}/#/", [
+        {"js": "(() => { const i = document.querySelector('input[type=text]'); i.value = 'https://www.youtube.com/watch?v=aqz-KE-bpKQ'; i.dispatchEvent(new Event('input')); })()",
+         "wait": "document.body.innerText.includes('Cumple los límites')"},
+        {"js": "(() => { const s = [...document.querySelectorAll('select')].find((x) => [...x.options].some((o) => o.value === 'cortos')); s.value = 'cortos'; s.dispatchEvent(new Event('change')); })()"},
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Procesar').click()",
+         "wait": "document.querySelector('#jobs') && document.querySelector('#jobs').innerText.includes('Clips cortos')"},
+    ], "[...document.querySelectorAll('select')].map((s) => [...s.options].map((o) => o.value).join('|') + ':' + s.value)")
+    assert any(x.startswith("cortos|tiktok|extendido") for x in sels)
+    assert json.loads(get(port, "/api/jobs"))["jobs"][0]["params"]["clip_preset"] == "cortos"
+    cfg = json.loads(get(port, "/api/config"))
+    assert cfg["defaults"]["clip_preset"] == "tiktok" and [p["id"] for p in cfg["clip_presets"]] == ["cortos", "tiktok", "extendido"]
+
+
+@needs_ui
+def test_ui_expand_with_context_previews_the_proposal_and_regenerates_keeping_the_original(running):
+    port, ctx, cfg = running
+    _ctx_session(cfg, "20261121-100000-small-ctx")
+    ctx.manager.runners["context"] = lambda j, c: None                             # la propuesta ya está preparada en disco
+    ctx.manager.runners["edit"] = lambda j, c: None
+    out = drive(f"http://127.0.0.1:{port}/#/sesion/20261121-100000-small-ctx", [
+        {"wait": "document.body.innerText.includes('Ampliar con contexto')"},
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Ampliar con contexto').click()",
+         "wait": "document.body.innerText.includes('Buscar contexto')"},
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Buscar contexto').click()",
+         "wait": "document.body.innerText.includes('Confirmar y regenerar')"},
+    ], "document.querySelector('.dlg').innerText")
+    assert "Original: 10 s" in out and "propuesto: 37.9 s" in out and "pausa natural" in out and "confianza alta" in out
+    assert "se conservan" in out and "Ver la propuesta" in out                      # previsualizar + el original no se toca
+    drive(f"http://127.0.0.1:{port}/#/sesion/20261121-100000-small-ctx", [
+        {"wait": "document.body.innerText.includes('Ampliar con contexto')"},
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Ampliar con contexto').click()"},
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Buscar contexto').click()",
+         "wait": "document.body.innerText.includes('Confirmar y regenerar')"},
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Confirmar y regenerar').click()"},
+        {"wait": "true"},
+    ], "true")
+    jobs = json.loads(get(port, "/api/jobs"))["jobs"]
+    edit = next(j for j in jobs if j["kind"] == "edit")
+    assert edit["params"]["from_context"] is True and edit["params"]["note"]["confidence"] == "alta"             # el motivo lo pone el servidor
+    assert edit["params"]["start"] == 3.6 and edit["params"]["end"] == 41.5
+
+
+@needs_ui
+def test_ui_gallery_shows_final_duration_and_clip_without_context_for_old_clips(running):
+    port, _, cfg = running
+    _ctx_session(cfg, "20261121-100000-small-ctx")
+    text = drive(f"http://127.0.0.1:{port}/#/sesion/20261121-100000-small-ctx", [{"wait": "document.body.innerText.includes('Duración final')"}],
+                 "document.querySelector('#view').innerText")
+    assert "Duración final 10 s" in text and "recorte ajustado a la reacción (sin contexto automático)" in text    # un clip de 10 s se explica, no se esconde

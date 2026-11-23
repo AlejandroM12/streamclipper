@@ -71,6 +71,8 @@ Para una transmisión de varias horas: pegás la URL, **Nuevo** elige *Transmisi
 20 min (uno por vez, sin descargar el VOD entero), elige los mejores 10/15/20 momentos de **toda** la transmisión y solo renderiza esos.
 Se puede cancelar y continuar (también tras cerrar la aplicación). Detalle, tiempos medidos y límites en [auto-vod.md](auto-vod.md).
 
+**Clips con contexto.** En *Nuevo* elegís «Duración de los clips» (Cortos, TikTok / Reels por defecto, Extendidos): el clip se construye alrededor del momento (dónde empieza la situación y cuándo termina), sin forzar una duración. En la galería cada clip muestra su duración final, el momento en el stream y por qué se cortó así; **Ampliar con contexto** propone un clip más completo, lo previsualizás y creás una versión nueva sin tocar el original. Detalle en [context-clips.md](context-clips.md).
+
 ## Detección de momentos: Clásica o Smart Highlights
 
 En *Nuevo* se elige el modo de **Detección de momentos**. **Clásica** (por defecto) es el ranking original y la referencia.

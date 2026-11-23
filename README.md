@@ -7,7 +7,7 @@ La calidad de selección con gameplay real **aún no está validada**: ver [docs
 ## Inicio rápido (Windows 11)
 
 Doble clic en `instalar.bat` (una vez) y luego en `iniciar_streamclipper.bat`; se abre la aplicación en el navegador.
-Guía completa: [docs/app.md](docs/app.md). Detector experimental: [docs/smart-highlights.md](docs/smart-highlights.md). Transmisiones de varias horas: [docs/auto-vod.md](docs/auto-vod.md). Lo siguiente es la instalación manual y la CLI.
+Guía completa: [docs/app.md](docs/app.md). Detector experimental: [docs/smart-highlights.md](docs/smart-highlights.md). Transmisiones de varias horas: [docs/auto-vod.md](docs/auto-vod.md). Clips con contexto (qué pasó antes y cómo terminó): [docs/context-clips.md](docs/context-clips.md). Lo siguiente es la instalación manual y la CLI.
 
 ## Instalación manual
 

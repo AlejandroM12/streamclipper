@@ -11,14 +11,17 @@ from streamclipper.app.sessions import write_segment_meta
 from streamclipper.app.state import AppJob, Segment
 from streamclipper.core.config import Settings
 from streamclipper.auto import (
-    ANALYSIS_HEIGHT, BLOCK_S, MARGIN_S, Block, block_scales, clip_range, max_download_s, pool_from_block, select_global, shift_candidate,
-    shift_transcript,
+    ANALYSIS_HEIGHT, BLOCK_S, FETCH_S, MARGIN_S, Block, block_scales, max_download_s, merge_transcripts, pool_from_block, resolve_overlaps,
+    select_global, shift_candidate,
 )
 from streamclipper.core.errors import CancelledError, InvalidInputError, MediaError, StreamClipperError
 from streamclipper.edit import EditParams, render_edit
+from streamclipper.expand import prepare_context
 from streamclipper.media.download import DownloadLimits, download_media, download_segment, format_hms, parse_media_url
-from streamclipper.models import Candidate, Transcript
+from streamclipper.models import Candidate, Transcript, Word
+from streamclipper.models import Segment as TSegment
 from streamclipper.pipeline import run_pipeline
+from streamclipper.selection.context_clip import DEFAULT_PRESET, build_window
 
 
 def session_dir(settings: Settings, name: str) -> Path:
@@ -71,7 +74,8 @@ def _process_settings(settings: Settings, p: dict) -> Settings:
     # reuse_transcript: un video ya transcrito con el mismo modelo e idioma no se retranscribe
     return Settings(data_dir=settings.data_dir, whisper_model=p["model"], language=LANGUAGES[p["language"]],
                     max_clips=p["max_clips"], layout=p["layout"], safe_platform=p["platform"], cpu_threads=settings.cpu_threads,
-                    detector=p.get("detector", "classic"), smart_visual=p.get("smart_visual", True), reuse_transcript=True)
+                    detector=p.get("detector", "classic"), smart_visual=p.get("smart_visual", True), reuse_transcript=True,
+                    clip_preset=p.get("clip_preset", DEFAULT_PRESET))
 
 
 def real_segment(settings: Settings) -> Callable[[AppJob, Segment, JobControl], None]:
@@ -217,6 +221,37 @@ def real_block(settings: Settings, ydl_factory=None) -> Callable[[AppJob, Segmen
     return do
 
 
+def block_transcripts(settings: Settings, job: AppJob) -> list[dict]:
+    """Datos de cada bloque terminado con su transcripción (lo guardado por el análisis: no se retranscribe)."""
+    out = []
+    for seg in job.segments:
+        if seg.status == "done" and seg.session:
+            t = settings.jobs_dir / seg.session / "transcript.json"
+            if t.is_file():
+                out.append({"start": seg.start, "end": seg.end, "dl_start": seg.dl_start, "dl_end": seg.dl_end,
+                            "last": seg.index == len(job.segments) - 1, "transcript": Transcript.from_dict(json.loads(t.read_text(encoding="utf-8")))})
+    return out
+
+
+def context_range(item: dict, duration: float) -> tuple[int, int]:
+    """Rango a descargar para construir el clip: el momento con FETCH_S s de contexto a cada lado (dentro del VOD)."""
+    return max(0, int(item["start"] - FETCH_S)), min(int(duration), int(item["end"] + FETCH_S + 0.999))
+
+
+def provisional_interval(settings: Settings, job: AppJob, blocks: list[dict]) -> Callable[[dict], tuple[float, float]]:
+    """Intervalo contextual aproximado (solo con la transcripción, sin audio) para detectar solapamientos antes de renderizar."""
+    cfg = _process_settings(settings, job.params)
+    dur = job.params["vod_duration"]
+
+    def interval(item: dict) -> tuple[float, float]:
+        a, b = context_range(item, dur)
+        tr = merge_transcripts(blocks, a, b)
+        cand = Candidate(start=item["start"], end=item["end"], anchor=item["anchor"], triggers=item.get("triggers", []))
+        w = build_window(cand, tr.segments, None, dur, cfg, cfg.clip_preset, event=(item["start"], item["end"]))
+        return w.start, w.end
+    return interval
+
+
 def real_render(settings: Settings, ydl_factory=None) -> Callable[[AppJob, dict, JobControl], str]:
     """Render diferido de UN clip final: re-descarga solo su rango en alta calidad y lo renderiza con el pipeline existente,
     reutilizando la transcripción y el candidato del bloque (no se retranscribe ni se vuelve a detectar)."""
@@ -225,11 +260,14 @@ def real_render(settings: Settings, ydl_factory=None) -> Callable[[AppJob, dict,
         cfg = _process_settings(settings, p)
         cfg.reuse_transcript = False
         seg = job.segments[item["block"]]
-        a, b = clip_range(item, p["vod_duration"])
+        a, b = context_range(item, p["vod_duration"])
         res = download_segment(job.input, a, b, cfg, DownloadLimits(), on_exists="reuse", cancel=ctl.cancel, ydl_factory=ydl_factory, auto=True)
         block_dir = settings.jobs_dir / item["session"]
         shift = a - seg.dl_start                                # eje de tiempo del bloque → eje del recorte
-        tr = shift_transcript(Transcript.from_dict(json.loads((block_dir / "transcript.json").read_text(encoding="utf-8"))), shift, 0, b - a)
+        # el contexto narrativo puede venir de bloques vecinos: se reúne la transcripción ya hecha de todos los que tocan el rango
+        merged = merge_transcripts(block_transcripts(settings, job), a, b)
+        tr = Transcript(merged.language, [TSegment(s.start - a, s.end - a, s.text, [Word(w.start - a, w.end - a, w.text, w.prob) for w in s.words],
+                                                  s.no_speech_prob, s.avg_logprob, s.compression_ratio) for s in merged.segments], [], 2)
         raw = json.loads((block_dir / "result.json").read_text(encoding="utf-8"))["candidates"][item["rank"] - 1]
         cand = Candidate.from_dict(shift_candidate(raw, shift))
         ref = parse_media_url(job.input)
@@ -247,8 +285,27 @@ def real_render(settings: Settings, ydl_factory=None) -> Callable[[AppJob, dict,
             raise CancelledError("Cancelado")
         if result["status"] != "completed" or not result["clips"]:
             raise StreamClipperError(result.get("error") or "No se pudo generar el clip.")
+        clip = result["clips"][0]
+        write_segment_meta(cfg, result["job_id"], {
+            "group": job.id, "mode": "auto-clip", "url": job.input, "platform": ref.platform, "vod_id": ref.video_id, "vod_title": job.title,
+            "index": item["global_rank"] - 1, "count": len(job.result.get("plan", [])), "start": a + clip["start"], "end": a + clip["end"],
+            "start_hms": format_hms(a + clip["start"]), "end_hms": format_hms(a + clip["end"]), "global_rank": item["global_rank"],
+            "kind": item["kind"], "score": item["score"], "block": item["block"], "block_session": item["session"], "cut": [a, b],
+            "cut_shift_s": shift, "measured_cut_s": round(res.duration or 0, 2), "detector": p.get("detector", "classic"), "top": item.get("top", []),
+            "candidate": [item["start"], item["end"]], "duration": clip["duration"], "clip_preset": cfg.clip_preset,
+            "context": _abs_context(clip.get("context"), a)})
         return result["job_id"]
     return do
+
+
+def _abs_context(ctx: dict | None, a: float) -> dict | None:
+    """El contexto del clip está en el eje del recorte descargado; se guarda también en tiempo absoluto del VOD."""
+    if not ctx:
+        return None
+    out = dict(ctx)
+    for k in ("original", "event", "contextual", "final"):
+        out[k] = [round(a + v, 2) for v in ctx[k]]
+    return out
 
 
 def run_auto(settings: Settings, do_block=None, do_render=None):
@@ -270,7 +327,20 @@ def run_auto(settings: Settings, do_block=None, do_render=None):
                 res = json.loads((settings.jobs_dir / seg.session / "result.json").read_text(encoding="utf-8"))
                 pool += pool_from_block(_block_of(seg, len(job.segments)), seg.session, res)
             sel = select_global(pool, p["target"], p.get("explore", False))
-            job.result.update(plan=sel["plan"], exploratory=sel["exploratory"], notes=sel["notes"],
+            overlaps = {"dropped": [], "backfilled": 0}
+            ctl.stage("seleccion_global", "running", None, "resolviendo solapamientos entre los clips ya expandidos")
+            rec = [c for c in sel["plan"] if c["kind"] == "recommended"]
+            extra = [c for c in sel["plan"] if c["kind"] != "recommended"]
+            try:
+                res = resolve_overlaps(rec, sel["reserve"], provisional_interval(settings, job, block_transcripts(settings, job)))
+                sel["plan"] = sorted(res["accepted"] + extra, key=lambda c: -c["score"])
+                for i, c in enumerate(sel["plan"], 1):
+                    c["global_rank"] = i
+                overlaps = {"dropped": [{"id": d["id"], "reason": d["dropped_reason"]} for d in res["dropped"]], "backfilled": res["backfilled"]}
+            except (OSError, ValueError, KeyError):
+                ctl.warn("No se pudieron resolver los solapamientos con la transcripción de los bloques; se renderiza sin ese paso")
+            job.result.update(overlaps=overlaps,
+                              plan=sel["plan"], exploratory=sel["exploratory"], notes=sel["notes"],
                               summary={"recommended": sel["recommended"], "exploratory_available": len(sel["exploratory"]),
                                        "candidates_total": sel["candidates_total"], "duplicates_avoided": sel["duplicates_avoided"],
                                        "crowd_skipped": sel["crowd_skipped"], "target": p["target"]},
@@ -303,6 +373,15 @@ def run_auto(settings: Settings, do_block=None, do_render=None):
     return runner
 
 
+def run_context(settings: Settings, ydl_factory=None):
+    def runner(job: AppJob, ctl: JobControl) -> None:
+        p = job.params
+        prop = prepare_context(session_dir(settings, p["session"]), p["clip"], p["preset"], settings, ctl.cancel, ctl.pipeline_progress, ydl_factory)
+        ctl.set(result={"session": p["session"], "clip": p["clip"], "start": prop["start"], "end": prop["end"], "duration": prop["duration"],
+                        "source": prop["source"], "confidence": (prop.get("context") or {}).get("confidence")})
+    return runner
+
+
 def run_edit(settings: Settings):
     def runner(job: AppJob, ctl: JobControl) -> None:
         p = job.params
@@ -320,4 +399,4 @@ def default_runners(settings: Settings) -> dict:
 
     def route(job: AppJob, ctl: JobControl) -> None:      # un mismo tipo de trabajo (vod) con dos modos: tramos manuales o automático
         (auto if job.params.get("mode") == "auto" else vod)(job, ctl)
-    return {"process": run_process(settings), "edit": run_edit(settings), "vod": route}
+    return {"process": run_process(settings), "edit": run_edit(settings), "vod": route, "context": run_context(settings)}

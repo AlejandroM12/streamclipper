@@ -6,6 +6,7 @@ from pathlib import Path
 
 from streamclipper.core.config import Settings
 from streamclipper.edit import list_edits
+from streamclipper.expand import load_proposal
 from streamclipper.jobs import load_result
 from streamclipper.models import Transcript
 from streamclipper.review import RATINGS, ReviewStore, build_items, clip_confidence, clip_transcript
@@ -153,10 +154,11 @@ def session_detail(settings: Settings, name: str, active: set[str] | None = None
                     "has_srt": (d / Path(it["media"]).parent / f"{Path(it['media']).stem}.srt").is_file()}))
         for m in list_edits(d, cname):
             versions.append(_version_entry(
-                job_id, cname, m["version"], f"Editada {m['version'].removeprefix('edit-')}",
+                job_id, cname, m["version"], ("Con contexto " if m.get("context_note") else "Editada ") + m['version'].removeprefix('edit-'),
                 f"edits/{cname}/{m['version'].removeprefix('edit-')}/clip.mp4", m["start"], m["end"], {
                     "kind": "edit", "media_exists": True, "issues": m.get("warnings", []), "cues": m.get("cue_count"),
                     "coverage_pct": (m.get("metrics") or {}).get("coverage_pct"), "has_srt": True,
+                    "context_note": m.get("context_note"), "with_context": bool(m.get("context_note")) or bool(m.get("context")),
                     "subtitles": m.get("subtitles"), "preset": m.get("preset"), "created_at": m.get("created_at"),
                     "framing": (m.get("framing") or {}).get("note")}))
         base = by_clip.get(cname, [None])[0] or {}
@@ -168,7 +170,8 @@ def session_detail(settings: Settings, name: str, active: set[str] | None = None
             "confidence": clip_confidence(transcript, c["start"], c["end"]),
             "reasons": [{"name": x["name"], "value": x["value"], "note": x["note"], "weight": x.get("weight"),
                          "contribution": x.get("contribution")} for x in cand.get("components", [])],
-            "refine_notes": c.get("refine_notes", []), "boundaries": c.get("boundaries", {}),
+            "refine_notes": c.get("refine_notes", []), "boundaries": c.get("boundaries", {}), "context": c.get("context"),
+            "proposal": load_proposal(d, cname),
             "audio": base.get("audio", {}), "versions": versions,
         })
     store = ReviewStore.for_source(settings, result.get("source_fingerprint", ""), result.get("source", ""))

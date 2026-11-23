@@ -36,6 +36,9 @@ class Settings:
     max_clips: int = 3
     min_score: float = 0.35
     max_overlap: float = 0.15
+    # construcción del clip: «legacy» = recorte ajustado a la reacción (8–30 s, etapa 3.1); «cortos», «tiktok» y «extendido» construyen
+    # el contexto narrativo alrededor del momento (ver docs/context-clips.md). La aplicación usa «tiktok» por defecto.
+    clip_preset: str = "legacy"
     # detección: «classic» (ranking original, línea base) o «smart» (Smart Highlights); ver docs/smart-highlights.md
     detector: str = "classic"
     smart_visual: bool = True              # smart: muestreo visual ligero y opcional (se degrada solo si falla)
@@ -118,6 +121,8 @@ class Settings:
             raise InvalidInputError("Duración de clip inválida: se requiere 5 <= min <= max <= 180 s")
         if not 1 <= self.max_clips <= 10:
             raise InvalidInputError("max_clips debe estar entre 1 y 10")
+        if self.clip_preset not in ("legacy", "cortos", "tiktok", "extendido"):
+            raise InvalidInputError(f"Preset de duración desconocido: {self.clip_preset}")
         if self.detector not in ("classic", "smart"):
             raise InvalidInputError(f"Detector desconocido: {self.detector} (classic o smart)")
         if self.layout not in ("blur-fit", "focus", "fill", "crop"):

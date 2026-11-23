@@ -60,7 +60,7 @@ def render_set(
             "selected_window": [round(c.start, 2), round(c.end, 2)], "refine_notes": r.notes if r else [],
             "render_seconds": round(time.monotonic() - t0, 2), "layout": settings.layout, "framing": layout.framing,
             "fade_in": fi, "fade_out": fo, "subtitle_problems": subs.problems, "duration_bounds": list(r.bounds) if r and r.bounds else None,
-            "explanation": c.explanation(), "triggers": c.triggers,
+            "explanation": c.explanation(), "triggers": c.triggers, "context": r.context if r else None,
         })
 
     for clip in clips:

@@ -27,10 +27,12 @@ from streamclipper.doctor import model_cached, run_doctor
 from streamclipper.edit import (
     PRESETS, EditParams, auto_cues, export_versions, merge_edits, resolve_version_files, srt_from_ass, validate_window,
 )
+from streamclipper.expand import load_proposal
 from streamclipper.jobs import load_result
 from streamclipper.media.download import DownloadLimits, inspect_media
 from streamclipper.models import Transcript
 from streamclipper.pipeline import settings_from_result
+from streamclipper.selection.context_clip import DEFAULT_PRESET, PRESETS as CLIP_PRESETS
 from streamclipper.webutil import ApiError, host_ok, read_json_body, send_bytes, send_file, send_json
 
 log = logging.getLogger("streamclipper.app")
@@ -38,7 +40,7 @@ VIDEO_EXT = (".mp4", ".mkv", ".mov", ".webm")
 _STATIC = Path(__file__).parent / "static" / "index.html"
 # Versión del contrato entre la página y la API (/api/config, /api/inspect…). Súbela al cambiar el formato de lo que la página lee.
 # La página y la API salen del MISMO proceso, y la página verifica que coincidan (ver loadConfig en index.html).
-API_CONTRACT = 5
+API_CONTRACT = 6
 
 
 def pick_file_dialog() -> str:
@@ -149,6 +151,9 @@ def make_handler(ctx: AppContext):
                     return send_json(self, auto_detail(s, ctx.manager.get(m.group(1)), ctx.active_sessions()))
                 if m := re.fullmatch(r"/api/groups/([\w-]+)", path):
                     return send_json(self, group_detail(s, m.group(1), ctx.active_sessions()))
+                if m := re.fullmatch(r"/api/sessions/([\w.-]+)/context", path):
+                    d = ctx.session(m.group(1))
+                    return send_json(self, {"proposal": load_proposal(d, (query.get("clip") or [""])[0])})
                 if m := re.fullmatch(r"/api/sessions/([\w.-]+)", path):
                     ctx.session(m.group(1))
                     return send_json(self, session_detail(s, m.group(1), ctx.active_sessions()))
@@ -193,6 +198,9 @@ def make_handler(ctx: AppContext):
                 ctx.session(m.group(1))
                 res = ctx.manager.delete_session(m.group(1))
                 return send_json(self, {"ok": True, **res})
+            if m := re.fullmatch(r"/api/sessions/([\w.-]+)/context", path):
+                ctx.session(m.group(1))
+                return send_json(self, ctx.manager.submit_context(m.group(1), str(body.get("clip", "")), str(body.get("preset") or DEFAULT_PRESET)).to_dict(), 201)
             if m := re.fullmatch(r"/api/sessions/([\w.-]+)/try-smart", path):
                 return send_json(self, self._try_smart(m.group(1), body), 201)
             if m := re.fullmatch(r"/api/sessions/([\w.-]+)/(subtitles|edit|rating|export)", path):
@@ -204,11 +212,12 @@ def make_handler(ctx: AppContext):
         def _config(self) -> dict:
             dl = DownloadLimits()
             return {
-                "version": __version__, "contract": API_CONTRACT, "defaults": {"model": "small", "language": "es", "layout": "blur-fit", "max_clips": 3, "detector": "classic",
+                "version": __version__, "contract": API_CONTRACT, "defaults": {"model": "small", "language": "es", "layout": "blur-fit", "max_clips": 3, "detector": "classic", "clip_preset": DEFAULT_PRESET,
                                                      "platform": "universal"},
                 "models": [{"id": m, "cached": model_cached(m), "label": {"small": "small (recomendado)", "base": "base (más rápido)"}[m]}
                            for m in MODELS],
                 "detectors": list(DETECTORS), "languages": list(LANGUAGES), "layouts": list(LAYOUTS), "presets": list(PRESETS),
+                "clip_presets": [{"id": k, "label": v["label"], "min": v["min"], "max": v["max"]} for k, v in CLIP_PRESETS.items()],
                 "platforms": ["universal", "tiktok", "reels", "shorts"],
                 "url_sources": ["YouTube", "Twitch", "Kick"], "url_limits": {"max_minutes": dl.max_duration_s / 60, "max_mb": dl.max_bytes // (1024 * 1024),
                                    "max_height": dl.max_height},
@@ -262,16 +271,24 @@ def make_handler(ctx: AppContext):
             win = next((c for c in result.get("clips", []) if c.get("name") == clip), None)
             if win is None:
                 raise ApiError(404, "Clip inexistente.")
+            use_ctx = bool(body.get("context"))
             if action == "subtitles":
-                start, end = self._window(body, result)
+                start, end = self._window(body, result, use_ctx, d)
                 cfg = settings_from_result(result, data_dir=s.data_dir)
-                tr = Transcript.from_dict(json.loads((d / "transcript.json").read_text(encoding="utf-8")))
+                tr = Transcript.from_dict(json.loads(((d / "context" if use_ctx else d) / "transcript.json").read_text(encoding="utf-8")))
                 auto = auto_cues(tr, start, end, cfg)
                 return send_json(self, {"cues": merge_edits(auto, body.get("edits") or []), "start": start, "end": end})
             # edit: se valida ahora (error inmediato y claro) y se encola; el render corre en el worker
+            body = {k: v for k, v in body.items() if k not in ("clip", "note")}
+            if body.get("from_context"):                     # el motivo de la construcción lo toma el servidor de la propuesta guardada
+                prop = load_proposal(d, clip)
+                if prop is None:
+                    raise ApiError(409, "No hay una propuesta de contexto para este clip: pulsá «Ampliar con contexto» primero.")
+                body["note"] = prop.get("context")
+                body["context"] = prop.get("source") == "context"
             params = EditParams.from_dict(body)
-            validate_window(params.start, params.end, float(result["media"]["duration"]))
-            job = ctx.manager.submit_edit(name, clip, {k: v for k, v in body.items() if k != "clip"})
+            self._window(body, result, params.context, d)
+            job = ctx.manager.submit_edit(name, clip, body)
             return send_json(self, job.to_dict(), 201)
 
         def _try_smart(self, name: str, body: dict) -> dict:
@@ -287,13 +304,17 @@ def make_handler(ctx: AppContext):
                       "smart_visual": bool(body.get("smart_visual", True))}
             return ctx.manager.submit_process(str(src), params, force=True).to_dict()
 
-        def _window(self, body: dict, result: dict) -> tuple[float, float]:
+        def _window(self, body: dict, result: dict, use_ctx: bool = False, d: Path | None = None) -> tuple[float, float]:
             try:
                 start, end = float(body["start"]), float(body["end"])
             except (KeyError, TypeError, ValueError):
                 raise ApiError(400, "Indicá inicio y final del clip.") from None
             try:
-                validate_window(start, end, float(result["media"]["duration"]))
+                media = float(result["media"]["duration"])
+                if use_ctx:
+                    from streamclipper.media.ffmpeg import probe
+                    media = probe(d / "context" / "source.mp4", ctx.settings.ffprobe).duration
+                validate_window(start, end, media)
             except InvalidInputError as e:
                 raise ApiError(400, str(e)) from None
             return start, end

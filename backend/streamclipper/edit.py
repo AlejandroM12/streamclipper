@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable
 
 from streamclipper.analysis.boundaries import check_boundaries
-from streamclipper.context import load_context
+from streamclipper.context import load_context, load_context_dir
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
 from streamclipper.core.errors import InvalidInputError, MediaError
@@ -29,7 +29,7 @@ from streamclipper.render.subtitles import (
 from streamclipper.render.vertical import render_clip
 from streamclipper.selection.refine import _fades
 
-EDIT_MIN_S, EDIT_MAX_S = 3.0, 60.0
+EDIT_MIN_S, EDIT_MAX_S = 3.0, 90.0
 PRESETS = {  # nombre visible -> ajustes de Settings
     "seguro": {"layout": "blur-fit"},
     "gameplay": {"layout": "focus"},
@@ -50,6 +50,8 @@ class EditParams:
     platform: str | None = None
     cues: list[dict] | None = None       # [{start, end, text}] en segundos del video original; None = automáticos
     fades: bool = True
+    context: bool = False                # el intervalo está en el eje de `<sesión>/context/source.mp4` (ver expand.py)
+    note: dict | None = None             # motivo de la construcción contextual (lo pone el servidor, nunca el cliente)
 
     @classmethod
     def from_dict(cls, d: dict) -> "EditParams":
@@ -58,7 +60,8 @@ class EditParams:
                     fg_x=None if d.get("fg_x") in (None, "") else float(d["fg_x"]),
                     fg_zoom=None if d.get("fg_zoom") in (None, "") else float(d["fg_zoom"]),
                     keep_regions=[str(r) for r in d["keep_regions"]] if d.get("keep_regions") else None,
-                    platform=d.get("platform") or None, cues=d.get("cues"), fades=bool(d.get("fades", True)))
+                    platform=d.get("platform") or None, cues=d.get("cues"), fades=bool(d.get("fades", True)),
+                    context=bool(d.get("context", False)), note=d.get("note") if isinstance(d.get("note"), dict) else None)
         except (KeyError, TypeError, ValueError):
             raise InvalidInputError("Parámetros de edición inválidos: se necesitan inicio y final numéricos.") from None
         if p.preset and p.preset not in PRESETS:
@@ -193,7 +196,8 @@ def render_edit(job_dir: Path, clip: str, params: EditParams, settings: Settings
     result = load_result(job_dir)
     if not any(c["name"] == clip for c in result.get("clips", [])):
         raise InvalidInputError(f"El clip {clip} no existe en esta sesión.")
-    validate_window(params.start, params.end, float(result["media"]["duration"]))
+    if not params.context:
+        validate_window(params.start, params.end, float(result["media"]["duration"]))
     overrides: dict = {}
     if params.preset:
         overrides.update(PRESETS[params.preset])
@@ -216,8 +220,10 @@ def render_edit(job_dir: Path, clip: str, params: EditParams, settings: Settings
     t0 = time.monotonic()
     try:
         progress("preparar", 0.0, "")
-        ctx, src = load_context(job_dir, result, cfg, work, cancel)
+        ctx, src = load_context_dir(job_dir, cfg, work, cancel) if params.context else load_context(job_dir, result, cfg, work, cancel)
         info = probe(src, cfg.ffprobe)
+        if params.context:
+            validate_window(params.start, params.end, info.duration)
         layout = compute_layout(info.width, info.height, cfg)
         if params.cues is None:
             cues = build_cues(ctx.transcript.segments, params.start, params.end, cfg, layout.sub_line_chars)
@@ -243,8 +249,8 @@ def render_edit(job_dir: Path, clip: str, params: EditParams, settings: Settings
             raise MediaError(f"El clip editado no pasó la validación: {v['problems']}")
         b = check_boundaries(ctx.transcript, params.start, params.end)
         warnings = cue_warnings + [f"Límite de frase: {m}" for m in b["errors"] + b["warnings"]]
-        if not 8 <= params.end - params.start <= 30:
-            warnings.append(f"La duración ({params.end - params.start:.1f} s) está fuera del rango habitual de 8–30 s para Shorts.")
+        if not 8 <= params.end - params.start <= 90:
+            warnings.append(f"La duración ({params.end - params.start:.1f} s) está fuera del rango habitual de 8–90 s para Shorts, Reels y TikTok.")
         meta = {
             "version": f"edit-v{n:03d}", "clip": clip, "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "start": round(params.start, 2), "end": round(params.end, 2), "duration": round(params.end - params.start, 2),
@@ -253,7 +259,7 @@ def render_edit(job_dir: Path, clip: str, params: EditParams, settings: Settings
             "subtitles": "editados" if params.cues is not None else "automáticos", "cue_count": len(cues),
             "metrics": cue_metrics([(c.start, c.end, "\\N".join(c.lines)) for c in cues], params.end - params.start,
                                    cfg.sub_max_cps, cfg.sub_min_duration, layout.sub_line_chars),
-            "warnings": warnings, "validation": v,
+            "warnings": warnings, "validation": v, "context": params.context, "context_note": params.note,
             "params": {"start": params.start, "end": params.end, "preset": params.preset, "fg_x": params.fg_x,
                        "fg_zoom": params.fg_zoom, "keep_regions": params.keep_regions, "platform": params.platform,
                        "fades": params.fades, "cues": params.cues},

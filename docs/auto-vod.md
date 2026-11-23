@@ -133,3 +133,8 @@ Estimaciones que muestra la app antes de empezar: **tiempo ≈ 0,25 × la duraci
 - El análisis usa 480p (suficiente para audio y fotogramas diminutos); los clips finales se renderizan desde una re-descarga en
   alta calidad (hasta 1080p según lo disponible).
 - La descarga de YouTube por rangos es más lenta (≈ 22 s para 30 s en la prueba).
+
+## Clips con contexto (1.4)
+
+Los clips finales ya no se ajustan solo a la reacción: se descarga el rango del clip con ±40 s de margen, se usa la transcripción reunida de
+los bloques vecinos y se resuelven los solapes entre clips ya ampliados antes del render. Ver [context-clips.md](context-clips.md).

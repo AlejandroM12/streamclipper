@@ -15,12 +15,13 @@ from pathlib import Path
 from typing import Callable
 
 from streamclipper.app.state import (
-    ACTIVE, AUTO_JOB_STAGES, EDIT_STAGES, PROCESS_STAGES, SEGMENT_STAGES, AppJob, JobStore, Segment, make_stages, segment_stage_keys,
+    ACTIVE, AUTO_JOB_STAGES, CONTEXT_STAGES, EDIT_STAGES, PROCESS_STAGES, SEGMENT_STAGES, AppJob, JobStore, Segment, make_stages, segment_stage_keys,
 )
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
 from streamclipper.core.errors import CancelledError, InvalidInputError, StreamClipperError
 from streamclipper.core.sysinfo import available_ram_gb
+from streamclipper.selection.context_clip import DEFAULT_PRESET, PRESETS as CLIP_PRESETS
 from streamclipper.media.download import (
     DownloadLimits, format_hms, inspect_media, is_segmentable, parse_media_url, validate_segments,
 )
@@ -155,7 +156,7 @@ class JobManager:
             st = path.stat()
             kind, src_key, title, source = "file", f"file:{path}:{st.st_size}:{st.st_mtime_ns}", path.name, str(path)
         dup_key = "|".join([src_key, params["model"], str(params["language"]), params["layout"], str(params["max_clips"]),
-                            params["detector"], str(params["smart_visual"] if params["detector"] == "smart" else "")])
+                            params["detector"], str(params["smart_visual"] if params["detector"] == "smart" else ""), params["clip_preset"]])
         self._check_duplicate(dup_key, force)
         self._check_capacity()
         job = AppJob(id=AppJob.new_id(), kind="process", title=title, input=source, input_kind=kind, params=params,
@@ -181,7 +182,8 @@ class JobManager:
             raise ApiError(400, str(e)) from None
         tag = ",".join(f"{s}-{e}" for s, e in spans)
         dup_key = "|".join([f"vod:{ref.platform}:{ref.video_id}", tag, params["model"], str(params["language"]), params["layout"],
-                            str(params["max_clips"]), params["detector"], str(params["smart_visual"] if params["detector"] == "smart" else "")])
+                            str(params["max_clips"]), params["detector"], str(params["smart_visual"] if params["detector"] == "smart" else ""),
+                            params["clip_preset"]])
         self._check_duplicate(dup_key, force)
         self._check_capacity()
         title = info.get("title") or f"{ref.label} VOD {ref.video_id}"
@@ -226,7 +228,8 @@ class JobManager:
         except InvalidInputError as e:
             raise ApiError(400, str(e)) from None
         dup_key = "|".join([f"auto:{ref.platform}:{ref.video_id}", str(target), str(explore), str(block_s), params["model"], str(params["language"]),
-                            params["layout"], params["detector"], str(params["smart_visual"] if params["detector"] == "smart" else "")])
+                            params["layout"], params["detector"], str(params["smart_visual"] if params["detector"] == "smart" else ""),
+                            params["clip_preset"]])
         self._check_duplicate(dup_key, force)
         self._check_capacity()
         title = info.get("title") or f"{ref.label} {ref.video_id}"
@@ -269,6 +272,18 @@ class JobManager:
         self._q.put(job_id)
         return job
 
+    def submit_context(self, session: str, clip: str, preset: str) -> AppJob:
+        """Prepara «Ampliar con contexto» para un clip (descarga solo el rango necesario y propone el intervalo)."""
+        if preset not in CLIP_PRESETS:
+            raise ApiError(400, "Duración de clips desconocida (cortos, tiktok o extendido).")
+        dup_key = f"context|{session}|{clip}"
+        self._check_duplicate(dup_key, force=True)
+        self._check_capacity()
+        job = AppJob(id=AppJob.new_id(), kind="context", title=f"Ampliar con contexto {clip}", input=session, input_kind="context",
+                     params={"session": session, "clip": clip, "preset": preset}, dup_key=dup_key, session=session,
+                     stages=make_stages(CONTEXT_STAGES))
+        return self._enqueue(job)
+
     def submit_edit(self, session: str, clip: str, params: dict) -> AppJob:
         dup_key = f"edit|{session}|{clip}"
         self._check_duplicate(dup_key, force=True)   # solo se rechaza si hay otra edición del mismo clip en curso
@@ -308,13 +323,16 @@ class JobManager:
         detector = p.get("detector") or "classic"
         if detector not in DETECTORS:
             raise ApiError(400, "Detección desconocida (classic o smart).")
+        clip_preset = p.get("clip_preset") or DEFAULT_PRESET
+        if clip_preset not in CLIP_PRESETS:
+            raise ApiError(400, "Duración de clips desconocida (cortos, tiktok o extendido).")
         platform = p.get("platform") or "universal"
         try:
             Settings(layout=layout, safe_platform=platform, max_clips=max_clips).validate()
         except InvalidInputError as e:
             raise ApiError(400, str(e)) from None
         return {"model": model, "language": lang, "layout": layout, "max_clips": max_clips, "platform": platform,
-                "detector": detector, "smart_visual": bool(p.get("smart_visual", True))}
+                "detector": detector, "smart_visual": bool(p.get("smart_visual", True)), "clip_preset": clip_preset}
 
     def _enqueue(self, job: AppJob) -> AppJob:
         with self._lock:

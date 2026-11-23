@@ -36,7 +36,9 @@ CROWD_EXCEPTION = 0.95    # un candidato con ≥ 95 % del mejor puntaje global s
 EXPLORATORY_CAP = 60
 ANALYZE_RTF = 0.25        # medido en esta PC (61 min de Kick): descarga + Whisper small + análisis de un bloque ≈ 0.25 × su duración
 RENDER_PER_CLIP_S = 35    # medido: re-descarga en alta calidad + render de un clip final ≈ 33 s
-CUT_PAD_S = 6.0           # margen de la re-descarga de cada clip final (keyframes, fades y refinado de límites)
+CUT_PAD_S = 6.0           # margen mínimo de la re-descarga (keyframes y fades)
+FETCH_S = 40.0            # contexto que se descarga a cada lado del momento: cubre el contexto narrativo (hasta 30 s) + margen
+OVERLAP_GAP_S = 3.0       # dos clips ya construidos a menos de esto entre sí se consideran el mismo momento
 
 
 @dataclass(frozen=True)
@@ -168,6 +170,60 @@ def shift_candidate(c: dict, shift: float) -> dict:
     out = dict(c, start=c["start"] - shift, end=c["end"] - shift, anchor=c["anchor"] - shift)
     out["components"] = [dict(x, window=[x["window"][0] - shift, x["window"][1] - shift] if x.get("window") else None) for x in c["components"]]
     return out
+
+
+def merge_transcripts(blocks: list[dict], a: float, b: float, language: str = "es") -> Transcript:
+    """Transcripción del rango absoluto [a, b] reunida desde TODOS los bloques que lo tocan, en tiempo absoluto del VOD.
+
+    Cada frase pertenece al bloque cuyo núcleo contiene su punto medio: así la zona de contexto que dos bloques transcribieron
+    se toma una sola vez y el contexto de un momento cercano a un límite de bloque viene del bloque vecino. No se retranscribe
+    nada. `blocks` = [{start, end, dl_start, dl_end, last, transcript}] (transcripciones en tiempo del bloque)."""
+    segs: list[Segment] = []
+    for blk in blocks:
+        if blk["dl_end"] < a or blk["dl_start"] > b:
+            continue
+        off = blk["dl_start"]
+        for s in blk["transcript"].segments:
+            s0, s1 = s.start + off, s.end + off
+            mid = (s0 + s1) / 2
+            owns = blk["start"] <= mid < blk["end"] or (blk.get("last") and mid == blk["end"])
+            if owns and s0 >= a - 0.01 and s1 <= b + 0.01:
+                segs.append(Segment(s0, s1, s.text, [Word(w.start + off, w.end + off, w.text, w.prob) for w in s.words],
+                                    s.no_speech_prob, s.avg_logprob, s.compression_ratio))
+    segs.sort(key=lambda x: x.start)
+    return Transcript(language, segs, [], 2)
+
+
+def resolve_overlaps(plan: list[dict], reserve: list[dict], interval_of, gap: float = OVERLAP_GAP_S) -> dict:
+    """Los clips ya expandidos pueden pisarse aunque sus anclas estén lejos: se resuelve ANTES del render final.
+
+    Se recorre por puntuación; un clip cuyo intervalo contextual se solapa (o queda a menos de `gap` s) con uno ya aceptado se
+    descarta y se reemplaza por el siguiente de la reserva que no choque. `interval_of(item) -> (inicio, fin)` absoluto."""
+    accepted: list[dict] = []
+    ivs: list[tuple[float, float]] = []
+    dropped: list[dict] = []
+
+    def clash(iv):
+        return any(iv[0] < o[1] + gap and o[0] < iv[1] + gap for o in ivs)
+
+    for c in sorted(plan, key=lambda x: -x["score"]):
+        iv = interval_of(c)
+        if clash(iv):
+            dropped.append(dict(c, dropped_reason="se solapa con un clip de mayor puntuación una vez expandido"))
+            continue
+        accepted.append(dict(c, provisional=[round(iv[0], 2), round(iv[1], 2)]))
+        ivs.append(iv)
+    backfilled = 0
+    for r in sorted(reserve, key=lambda x: -x["score"]):
+        if len(accepted) >= len(plan):
+            break
+        iv = interval_of(r)
+        if not clash(iv):
+            accepted.append(dict(r, kind="recommended", provisional=[round(iv[0], 2), round(iv[1], 2)]))
+            ivs.append(iv)
+            backfilled += 1
+    accepted.sort(key=lambda x: -x["score"])
+    return {"accepted": accepted, "dropped": dropped, "backfilled": backfilled}
 
 
 def clip_range(item: dict, duration: float, pad: float = CUT_PAD_S) -> tuple[int, int]:
