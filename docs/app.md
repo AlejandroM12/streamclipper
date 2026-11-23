@@ -65,6 +65,12 @@ segundos. La duración real se mide con FFprobe (que además exige video y audio
 pedida) y queda en `data\samples\<archivo>.source.json` (`measured_duration_s`, `extra_seconds`). Los tramos se guardan como
 `data\samples\<plataforma>-vod-<id>_<HHMMSS>-<HHMMSS>.mp4`.
 
+## Transmisión completa (automático)
+
+Para una transmisión de varias horas: pegás la URL, **Nuevo** elige *Transmisión completa (automático)* y analiza todo en bloques de
+20 min (uno por vez, sin descargar el VOD entero), elige los mejores 10/15/20 momentos de **toda** la transmisión y solo renderiza esos.
+Se puede cancelar y continuar (también tras cerrar la aplicación). Detalle, tiempos medidos y límites en [auto-vod.md](auto-vod.md).
+
 ## Detección de momentos: Clásica o Smart Highlights
 
 En *Nuevo* se elige el modo de **Detección de momentos**. **Clásica** (por defecto) es el ranking original y la referencia.
