@@ -22,7 +22,7 @@ from streamclipper.render.clips import render_set
 from streamclipper.report import write_reports
 from streamclipper.selection.base import AnalysisContext, CandidateScorer
 from streamclipper.selection.refine import refine_selected
-from streamclipper.selection.selector import find_clips, selection_report
+from streamclipper.selection.selector import find_clips, is_eligible, selection_report
 from streamclipper.selection.smart import build_smart_scorer
 from streamclipper.transcription.sentences import split_sentences
 from streamclipper.transcription.whisper import transcribe
@@ -102,7 +102,13 @@ def run_pipeline(
     keep_temp: bool = False,
     label: str | None = None,
     on_job_dir: Callable[[str, Path], None] | None = None,
+    analysis_only: bool = False,
+    preset_transcript: Transcript | None = None,
+    preset_candidates: list | None = None,
 ) -> dict:
+    """analysis_only: analiza y guarda candidatos (y cuáles son «elegibles») pero NO renderiza (bloques del modo automático).
+    preset_transcript / preset_candidates: usa esa transcripción y renderiza exactamente esos candidatos, sin transcribir ni
+    detectar de nuevo (clips finales del modo automático)."""
     cancel = cancel or CancelToken()
     progress = progress or (lambda *_: None)
     settings.validate()
@@ -175,8 +181,12 @@ def run_pipeline(
                 extract_audio(src, wav, settings.ffmpeg, cancel)
 
             with stage("transcribir"):
-                reused = find_reusable_transcript(settings, result["source_fingerprint"]) if settings.reuse_transcript else None
-                if reused:
+                reused = (find_reusable_transcript(settings, result["source_fingerprint"])
+                          if settings.reuse_transcript and preset_transcript is None else None)
+                if preset_transcript is not None:
+                    transcript = preset_transcript
+                    progress("transcribir", 1.0, "transcripción ya disponible (no se retranscribe)")
+                elif reused:
                     transcript = reused[0]
                     result["transcript_reused_from"] = reused[1]
                     progress("transcribir", 1.0, f"transcripción reutilizada de {reused[1]} (no se retranscribe)")
@@ -199,33 +209,44 @@ def run_pipeline(
             with stage("seleccionar"):
                 ctx = AnalysisContext(transcript, curve, info.duration, settings)
                 use_scorer = scorer
-                if use_scorer is None and settings.detector == "smart":
-                    use_scorer = build_smart_scorer(wav, curve, src, settings, cancel, warn)
-                candidates, chosen = find_clips(ctx, use_scorer)
-                result["detector"] = use_scorer.info() if hasattr(use_scorer, "info") else {
-                    "requested": settings.detector, "effective": "clásico"}
+                if preset_candidates is not None:
+                    candidates = chosen = list(preset_candidates)
+                    result["detector"] = {"requested": settings.detector, "effective": "candidatos ya elegidos (modo automático)"}
+                else:
+                    if use_scorer is None and settings.detector == "smart":
+                        use_scorer = build_smart_scorer(wav, curve, src, settings, cancel, warn)
+                    candidates, chosen = find_clips(ctx, use_scorer)
+                    result["detector"] = use_scorer.info() if hasattr(use_scorer, "info") else {
+                        "requested": settings.detector, "effective": "clásico"}
                 for rank, c in enumerate(candidates, 1):
                     c.rank = rank
                 result["candidates"] = [c.to_dict() for c in candidates]
                 result["selected"] = [c.rank for c in chosen]
-                result["selection"] = selection_report(candidates, chosen, ctx)
-                if result["selection"]["fragile"]:
-                    warn(result["selection"]["message"])
-                if not chosen:
+                if analysis_only:
+                    result["analysis_only"] = True
+                    result["eligible"] = [c.rank for c in candidates if is_eligible(c, ctx, use_scorer)]
+                if preset_candidates is None:
+                    result["selection"] = selection_report(candidates, chosen, ctx)
+                    if result["selection"]["fragile"]:
+                        warn(result["selection"]["message"])
+                if not chosen and not analysis_only:
                     result["note"] = "No se encontraron momentos que superen el umbral; no se generaron clips."
                     warn(result["note"])
-                progress("seleccionar", 1.0, f"{len(chosen)} clip(s) seleccionados de {len(candidates)} candidatos")
+                msg = (f"{len(result.get('eligible', []))} candidato(s) elegibles de {len(candidates)}" if analysis_only
+                       else f"{len(chosen)} clip(s) seleccionados de {len(candidates)} candidatos")
+                progress("seleccionar", 1.0, msg)
 
-            with stage("renderizar"):
-                names = [f"clip_{i:02d}" for i in range(1, len(chosen) + 1)]
-                # los límites se ajustan DESPUÉS de elegir: el ranking y las puntuaciones no cambian
-                windows = dict(zip(names, refine_selected(chosen, ctx)))
-                result["clips"] = render_set(
-                    src, list(zip(names, chosen)), transcript, settings, work, out_dir, cancel, progress, warnings,
-                    refined=windows)
+            if not analysis_only:
+                with stage("renderizar"):
+                    names = [f"clip_{i:02d}" for i in range(1, len(chosen) + 1)]
+                    # los límites se ajustan DESPUÉS de elegir: el ranking y las puntuaciones no cambian
+                    windows = dict(zip(names, refine_selected(chosen, ctx)))
+                    result["clips"] = render_set(
+                        src, list(zip(names, chosen)), transcript, settings, work, out_dir, cancel, progress, warnings,
+                        refined=windows)
 
-            with stage("verificar"):
-                pass  # la validación FFprobe/decodificación y los límites de frase ya corrieron en render_set
+                with stage("verificar"):
+                    pass  # la validación FFprobe/decodificación y los límites de frase ya corrieron en render_set
 
             result["status"] = "completed"
     except CancelledError as e:

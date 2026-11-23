@@ -107,7 +107,7 @@ let CONFIG = null, JOBS = [], pollTimer = null, currentView = null;
 const NAV = [["#/", "Nuevo"], ["#/sesiones", "Sesiones"], ["#/estado", "Estado del sistema"]];
 function renderNav() {
   const h = location.hash || "#/";
-  const nav = $("#nav"); nav.replaceChildren(...NAV.map(([href, label]) => el("a", { href, class: (h === href || (href === "#/sesiones" && (h.startsWith("#/sesion/") || h.startsWith("#/vod/")))) ? "on" : "" }, label)));
+  const nav = $("#nav"); nav.replaceChildren(...NAV.map(([href, label]) => el("a", { href, class: (h === href || (href === "#/sesiones" && (h.startsWith("#/sesion/") || h.startsWith("#/vod/") || h.startsWith("#/auto/")))) ? "on" : "" }, label)));
 }
 window.addEventListener("hashchange", route);
 async function route() {
@@ -121,6 +121,7 @@ async function route() {
     else if (h === "#/estado") await viewDoctor(view);
     else if (h.startsWith("#/sesion/")) await viewSession(view, decodeURIComponent(h.slice(9)));
     else if (h.startsWith("#/vod/")) await viewGroup(view, decodeURIComponent(h.slice(6)));
+    else if (h.startsWith("#/auto/")) await viewAuto(view, decodeURIComponent(h.slice(7)));
     else view.replaceChildren(el("div", { class: "card" }, "Página no encontrada."));
   } catch (e) { view.replaceChildren(el("div", { class: "card err" }, "No se pudo cargar: " + e.message)); }
 }
@@ -148,7 +149,45 @@ function segCard(sg, j) {
   if (sg.session && sg.status === "done") box.append(el("a", { href: "#/sesion/" + encodeURIComponent(sg.session) }, "Abrir los clips de este tramo"));
   return box;
 }
+const CHIP = { done: "var(--ok)", running: "var(--acc)", failed: "var(--bad)", cancelled: "var(--mut)", pending: "var(--line)" };
+function autoCard(j) {
+  const active = j.status === "queued" || j.status === "running";
+  const n = j.segments.length, done = j.segments.filter((x) => x.status === "done").length;
+  const cur = j.segments.find((x) => x.status === "running");
+  const cands = j.segments.reduce((a, x) => a + ((x.result && x.result.candidates) || 0), 0);
+  const elig = j.segments.reduce((a, x) => a + ((x.result && x.result.eligible) || 0), 0);
+  const res = j.result || {}, sum = res.summary || null, rendered = Object.keys(res.rendered || {}).length;
+  const box = el("div", { class: "job" },
+    el("h3", {}, j.title || j.id, "  ", el("span", { class: "badge " + j.status }, STATUS[j.status] || j.status),
+      j.status === "queued" && j.queue_position ? el("span", { class: "mut small" }, "  posición " + j.queue_position + " en la cola") : null),
+    el("div", { class: "mut small" }, (j.params.platform_name || "") + " · Transmisión completa (automático) · " + fdate(j.created_at) + " · Whisper " + j.params.model
+      + " · Detección " + (DETECTOR[j.params.detector] || j.params.detector) + " · objetivo " + j.params.target + " clips"),
+    el("div", { class: "small", style: "margin-top:6px" }, el("strong", {}, "Bloques completados: " + done + " de " + n + " (" + Math.round(done / n * 100) + " %)")),
+    el("div", { class: "bar" }, el("i", { style: "width:" + Math.round(done / n * 100) + "%" })));
+  if (cur) box.append(el("div", { class: "small", style: "margin-top:6px" }, "Ahora: bloque " + (cur.index + 1) + " de " + n + " (" + hms(cur.start) + "–" + hms(cur.end) + " del stream)"),
+    el("div", { class: "stages" }, cur.stages.filter((x) => x.status !== "pending" || cur.status === "running").map(stageRow)));
+  box.append(el("div", { style: "display:flex;flex-wrap:wrap;gap:3px;margin:8px 0" }, ...j.segments.map((x) => el("span", {
+    title: "Bloque " + (x.index + 1) + " · " + hms(x.start) + "–" + hms(x.end) + " · " + (SEG_STATUS[x.status] || x.status) + (x.result && x.result.candidates != null ? " · " + x.result.candidates + " candidatos" : ""),
+    style: "width:14px;height:14px;border-radius:3px;border:1px solid var(--line);background:" + (CHIP[x.status] || CHIP.pending) }))));
+  box.append(el("div", { class: "small" }, "Candidatos encontrados: " + cands + " (" + elig + " cumplen el umbral normal) · Clips finales seleccionados: "
+    + (sum ? sum.recommended + " recomendados" + (res.plan && res.plan.length > sum.recommended ? " + " + (res.plan.length - sum.recommended) + " exploratorios" : "") + " de " + sum.target + " pedidos"
+      : "todavía ninguno: se eligen al terminar TODOS los bloques")));
+  const gs = j.stages.filter((x) => x.status !== "pending");
+  if (gs.length) box.append(el("div", { class: "stages" }, gs.map(stageRow)));
+  if (sum) box.append(el("div", { class: "small mut" }, "Clips generados: " + rendered + " de " + (res.plan || []).length + " · duplicados evitados: " + sum.duplicates_avoided
+    + (res.exploratory && res.exploratory.length ? " · exploratorios disponibles: " + res.exploratory.length : "")));
+  for (const w of (j.warnings || []).slice(0, 6)) box.append(el("div", { class: "box warn" }, "⚠ " + w));
+  if (j.error) { const b = el("div", { class: "box err" }, el("strong", {}, "No se pudo completar: "), j.error); if (j.hint) b.append(el("div", { class: "mut" }, "Sugerencia: " + j.hint)); box.append(b); }
+  for (const x of j.segments.filter((y) => y.status === "failed")) box.append(segCard(x, j));
+  const acts = el("div", { class: "row" });
+  if (active) acts.append(el("button", { class: "danger fix", onclick: async () => { try { await api("/api/jobs/" + j.id + "/cancel", {}); loadJobs(); } catch (e) { toast(e.message); } } }, "Cancelar"));
+  if (["failed", "cancelled", "interrupted"].includes(j.status)) acts.append(el("button", { class: "fix", onclick: async () => { try { await api("/api/jobs/" + j.id + "/retry", {}); loadJobs(); } catch (e) { toast(e.message); } } }, "Continuar (los bloques terminados no se repiten)"));
+  if (!active && (rendered > 0 || j.status === "completed")) acts.append(el("a", { href: "#/auto/" + encodeURIComponent(j.id) }, el("button", { class: "primary fix" }, "Ver la galería global")));
+  box.append(acts);
+  return box;
+}
 function jobCard(j) {
+  if (j.params && j.params.mode === "auto") return autoCard(j);
   const active = j.status === "queued" || j.status === "running";
   const isVod = j.kind === "vod";
   const box = el("div", { class: "job" },
@@ -215,6 +254,54 @@ async function viewNew(view) {
   let previewSeq = 0, previewTimer = null;
   let segInfo = null;                       // resultado de /api/inspect cuando es un VOD de Twitch/Kick
   const segBox = el("div", { style: "display:none" });
+  const autoBox = el("div", { style: "display:none" });
+  const modeSel = el("select", {}, el("option", { value: "short" }, "Video corto"), el("option", { value: "segments" }, "Seleccionar tramos"),
+    el("option", { value: "auto" }, "Transmisión completa (automático)"));
+  const modeNote = el("div", {});
+  const modeRow = el("div", { class: "row", style: "display:none" }, el("div", {}, el("label", {}, "Modo de procesamiento"), modeSel));
+  const targetSel = el("select", {}, ...[10, 15, 20].map((nn) => el("option", { value: nn, selected: nn === 15 }, nn + " clips")));
+  const exploreChk = el("input", { type: "checkbox", style: "width:auto" });
+  let lastInfo = null, modeTouched = false;
+  function drawAuto(r) {
+    const a = r.auto;
+    autoBox.replaceChildren(el("h3", {}, "Transmisión completa (automático)"),
+      el("div", { class: "small" }, "Se analizará TODA la transmisión: " + hms(r.duration) + " en " + a.blocks + " bloques de " + a.block_minutes + " min (con 30 s de contexto a cada lado para no perder momentos en los límites). Se descarga y procesa un bloque por vez, en baja calidad (" + a.analysis_height + "p); nunca se descarga el VOD completo."),
+      el("div", { class: "row", style: "margin-top:8px" }, el("div", {}, el("label", {}, "Objetivo de clips"), targetSel)),
+      el("label", { style: "display:flex;gap:8px;align-items:center" }, exploreChk, "Si hay menos momentos recomendados que el objetivo, generar también candidatos exploratorios (de menor confianza)"),
+      el("div", { class: "box warn" },
+        el("div", {}, "⏱ Tiempo estimado en esta PC: " + a.est_hours_low + "–" + a.est_hours_high + " h (medido con Whisper small: ≈ 0,25× la duración, más ≈ 35 s por clip final). Dejá la computadora encendida y la aplicación abierta."),
+        el("div", {}, "💾 Disco: ≈ " + a.disk_peak_gb + " GB temporales (un bloque a la vez; se borra al analizarlo) + ≈ " + a.final_clips_gb + " GB para los clips finales."),
+        el("div", {}, "Podés cancelar y continuar más tarde: los bloques terminados se conservan. Para renderizar, los clips elegidos se vuelven a descargar en alta calidad, así que el VOD debe seguir disponible.")));
+    autoBox.style.display = "";
+  }
+  function refreshGo() {
+    if (kind === "file" || !lastInfo) { go.disabled = false; return; }
+    const m = modeSel.value;
+    if (m === "segments") { segRefresh(); return; }
+    go.disabled = m === "auto" ? !(lastInfo.auto && lastInfo.auto.available) : lastInfo.acceptable === false;
+  }
+  function applyMode(fromInspect) {
+    const r = lastInfo;
+    if (fromInspect && !modeTouched && r) {
+      const long = r.duration > 1200;
+      modeSel.value = long && r.auto && r.auto.available ? "auto" : long && r.segmentable ? "segments" : "short";
+    }
+    segInfo = null; segBox.style.display = "none"; autoBox.style.display = "none"; modeNote.replaceChildren();
+    modeRow.style.display = r && (r.segmentable || (r.auto && r.auto.available)) ? "" : "none";
+    const m = modeSel.value;
+    clips.parentElement.style.display = r && m === "auto" ? "none" : "";      // en automático el objetivo reemplaza la cantidad de clips
+    if (r && m === "segments") {
+      if (r.segmentable) { segInfo = r; if (!segRows.length) segRows = [{ start: "00:00:00", end: hms(Math.min(600, Math.floor(r.duration))) }]; segDraw(); }
+      else modeNote.replaceChildren(el("div", { class: "box warn small" }, "Los tramos manuales solo están disponibles para VOD de Twitch y Kick."));
+    } else if (r && m === "auto") {
+      if (r.auto && r.auto.available) drawAuto(r);
+      else modeNote.replaceChildren(el("div", { class: "box warn small" }, (r.auto && r.auto.reason) || "La transmisión completa solo está disponible para VOD de Twitch y Kick o videos largos de YouTube."));
+    } else if (r && m === "short" && r.acceptable === false) {
+      modeNote.replaceChildren(el("div", { class: "box warn small" }, (r.reason || "No se puede procesar como video corto.") + (r.auto && r.auto.available ? " Elegí «Seleccionar tramos» o «Transmisión completa (automático)»." : "")));
+    }
+    refreshGo();
+  }
+  modeSel.addEventListener("change", () => { modeTouched = true; applyMode(false); });
   let segRows = [], segErr = [], segDur = [], segTotal = null, segAdd = null;
   function segValidate() {
     const errs = segRows.map(() => ""), spans = [];
@@ -235,7 +322,7 @@ async function viewNew(view) {
     return { errs, total, ok: segRows.length > 0 && errs.every((x) => !x) };
   }
   function segRefresh() {
-    if (!segInfo) { go.disabled = false; return; }
+    if (!segInfo) return;
     const v = segValidate();
     segRows.forEach((r, i) => {
       const a = parseHms(r.start), b = parseHms(r.end);
@@ -280,18 +367,20 @@ async function viewNew(view) {
       preview.replaceChildren(el("div", { class: "box" + (r.acceptable ? "" : " warn") },
         el("strong", {}, r.title || "(sin título)"),
         el("div", { class: "small mut" }, r.platform_label + " · " + r.kind_label + " · " + mins + (r.uploader ? " · " + r.uploader : "") + (r.estimated_mb ? " · ≈ " + r.estimated_mb + " MB" : "")),
-        r.acceptable ? el("div", { class: "small ok" }, r.segmentable ? "✓ VOD: elegí abajo los tramos que querés procesar." : "✓ Cumple los límites: se puede procesar.") : el("div", { class: "small err" }, "✗ " + (r.reason || "No se puede procesar este video.")),
+        (r.auto && r.auto.available && r.duration > 1200) || (r.acceptable && r.segmentable) ? el("div", { class: "small ok" }, "✓ Transmisión larga: elegí abajo cómo procesarla.")
+          : r.acceptable ? el("div", { class: "small ok" }, "✓ Cumple los límites: se puede procesar.") : el("div", { class: "small err" }, "✗ " + (r.reason || "No se puede procesar este video.")),
         ...(r.warnings || []).map((w) => el("div", { class: "small warn" }, "⚠ " + w))));
-      if (r.segmentable) { segInfo = r; segRows = [{ start: "00:00:00", end: hms(Math.min(600, Math.floor(r.duration))) }]; segDraw(); }
+      lastInfo = r; segRows = []; applyMode(true);
     } catch (e) {
       if (seq !== previewSeq) return;
       preview.replaceChildren(el("div", { class: "box err" }, e.message));
     }
   }
-  const segReset = () => { segInfo = null; segRows = []; segBox.style.display = "none"; segBox.replaceChildren(); go.disabled = false; };
+  const segReset = () => { segInfo = null; segRows = []; lastInfo = null; modeTouched = false; segBox.style.display = "none"; segBox.replaceChildren(); autoBox.style.display = "none";
+    modeRow.style.display = "none"; modeNote.replaceChildren(); go.disabled = false; };
   url.addEventListener("input", () => { clearTimeout(previewTimer); previewSeq++; segReset(); if (!url.value.trim()) { preview.replaceChildren(); return; } previewTimer = setTimeout(checkUrl, 700); });
-  const urlBox = el("div", {}, el("label", {}, "URL de YouTube, Twitch o Kick"), url, preview, segBox,
-    el("div", { class: "mut small" }, "Solo videos públicos: YouTube, VOD o clip de Twitch, VOD o clip de Kick (no directos, listas ni canales). Hasta " + CONFIG.url_limits.max_minutes + " min, " + CONFIG.url_limits.max_mb + " MB y " + CONFIG.url_limits.max_height + "p. Sin cuentas ni cookies. Usá contenido propio o con autorización."));
+  const urlBox = el("div", {}, el("label", {}, "URL de YouTube, Twitch o Kick"), url, preview, modeRow, modeNote, segBox, autoBox,
+    el("div", { class: "mut small" }, "Solo videos públicos: YouTube, VOD o clip de Twitch, VOD o clip de Kick (no directos, listas ni canales). Para «Video corto»: hasta " + CONFIG.url_limits.max_minutes + " min, " + CONFIG.url_limits.max_mb + " MB y " + CONFIG.url_limits.max_height + "p. Sin cuentas ni cookies. Usá contenido propio o con autorización."));
   const fileBox = el("div", { style: "display:none" }, el("label", {}, "Archivo de video (MP4, MKV, MOV o WEBM)"),
     el("div", { class: "row" }, path, el("button", { class: "fix", type: "button", onclick: async (ev) => {
       ev.target.disabled = true; ev.target.textContent = "Esperando el selector…";
@@ -306,14 +395,16 @@ async function viewNew(view) {
   const segBtns = [["url", "URL (YouTube, Twitch, Kick)"], ["file", "Archivo local"]].map(([k, label]) => el("button", { type: "button", class: k === "url" ? "on" : "", onclick: () => {
     kind = k; urlBox.style.display = k === "url" ? "" : "none"; fileBox.style.display = k === "file" ? "" : "none";
     segBtns.forEach((b, i) => b.classList.toggle("on", ["url", "file"][i] === k));
+    refreshGo();
   } }, label));
   async function submit(force) {
     go.disabled = true;
-    const segs = kind === "url" && segInfo ? segRows.map((r) => ({ start: r.start.trim(), end: r.end.trim() })) : null;
+    const segs = kind === "url" && segInfo && modeSel.value === "segments" ? segRows.map((r) => ({ start: r.start.trim(), end: r.end.trim() })) : null;
+    const autoReq = kind === "url" && lastInfo && modeSel.value === "auto" && lastInfo.auto && lastInfo.auto.available ? { target: Number(targetSel.value), explore: exploreChk.checked } : null;
     const params = { model: model.value, language: lang.value, layout: layout.value, max_clips: Number(clips.value), platform: platform.value, detector: detector.value, smart_visual: visual.checked };
     try {
-      await api("/api/jobs", { source: kind === "url" ? url.value : path.value, params, force: !!force, ...(segs ? { segments: segs } : {}) });
-      toast("Trabajo agregado. El progreso aparece abajo.");
+      await api("/api/jobs", { source: kind === "url" ? url.value : path.value, params, force: !!force, ...(segs ? { segments: segs } : {}), ...(autoReq ? { auto: autoReq } : {}) });
+      toast(autoReq ? "Transmisión agregada. El progreso por bloque aparece abajo." : "Trabajo agregado. El progreso aparece abajo.");
       loadJobs();
     } catch (e) {
       if (e.status === 409 && e.data.duplicate === "completed") {
@@ -324,7 +415,7 @@ async function viewNew(view) {
       } else $("#formmsg").replaceChildren(el("div", { class: "box err" }, e.message));
     }
     go.disabled = false;
-    segRefresh();
+    refreshGo();
   }
   go.addEventListener("click", () => { $("#formmsg").replaceChildren(); submit(false); });
   view.replaceChildren(
@@ -359,14 +450,34 @@ async function viewSessions(view) {
   const draw = () => {
     const q = filter.value.toLowerCase();
     const items = sessions.filter((s) => !q || (s.title + " " + (s.model || "") + " " + s.id).toLowerCase().includes(q));
-    const groups = new Map(), entries = [];
+    const groups = new Map(), entries = [], hiddenBy = {};
+    for (const s of sessions) if (s.hidden) (hiddenBy[s.segment.group] = hiddenBy[s.segment.group] || []).push(s);
     for (const s of items) {
+      if (s.hidden) continue;
       if (!s.segment) { entries.push({ s }); continue; }
+      if (s.segment.mode === "auto-clip") {
+        let ag = groups.get("auto:" + s.segment.group);
+        if (!ag) { ag = { auto: true, group: s.segment.group, vod: s.segment, segs: [], created: s.created }; groups.set("auto:" + s.segment.group, ag); entries.push({ g: ag }); }
+        ag.segs.push(s); continue;
+      }
       let g = groups.get(s.segment.group);
       if (!g) { g = { group: s.segment.group, vod: s.segment, segs: [], created: s.created }; groups.set(s.segment.group, g); entries.push({ g }); }
       g.segs.push(s);
     }
+    async function removeAuto(g) {
+      const all = [...g.segs, ...(hiddenBy[g.group] || [])];
+      if (!confirm("¿Eliminar la transmisión «" + g.vod.vod_title + "»?\n\nSe borrarán sus " + g.segs.length + " clip(s) con sus valoraciones y exportaciones, y el análisis de " + (hiddenBy[g.group] || []).length + " bloque(s). No se puede deshacer.\nEl VOD original en la plataforma no se toca.")) return;
+      for (const x of all) { try { await api("/api/sessions/" + encodeURIComponent(x.id) + "/delete", { confirm: true }); } catch (e) { toast(e.message, 6000); break; } }
+      sessions = (await api("/api/sessions")).sessions; draw();
+    }
+    const autoGroupCard = (g) => el("div", { class: "card sess", style: "grid-column:1/-1", onclick: () => { location.hash = "#/auto/" + encodeURIComponent(g.group); } },
+      el("strong", {}, g.vod.vod_title), el("div", { class: "mut small" }, g.vod.platform + " · Transmisión completa (automático) · " + fdate(g.created) + " · detección " + (DETECTOR[g.vod.detector] || g.vod.detector)),
+      el("div", { style: "margin-top:6px" }, g.segs.length + " clip(s) final(es): " + g.segs.filter((x) => x.segment.kind === "recommended").length + " recomendados, " + g.segs.filter((x) => x.segment.kind === "exploratory").length
+        + " exploratorios · " + (hiddenBy[g.group] || []).length + " bloque(s) analizados"),
+      el("div", { class: "mut small" }, "Clic para abrir la galería global."),
+      el("div", { style: "margin-top:8px" }, el("button", { class: "danger", disabled: g.segs.some(busy), onclick: (ev) => { ev.stopPropagation(); removeAuto(g); } }, "Eliminar transmisión")));
     const groupCard = (g) => {
+      if (g.auto) return autoGroupCard(g);
       g.segs.sort((a, b) => a.segment.index - b.segment.index);
       return el("div", { class: "card sess", style: "grid-column:1/-1", onclick: () => { location.hash = "#/vod/" + encodeURIComponent(g.group); } },
         el("strong", {}, g.vod.vod_title), el("div", { class: "mut small" }, g.vod.platform + " VOD · " + fdate(g.created) + " · " + g.segs.length + " de " + g.vod.count + " tramo(s) con sesión · " + g.segs.reduce((n, x) => n + x.clips, 0) + " clip(s) en total"),
@@ -423,10 +534,10 @@ async function viewGroup(view, gid) {
   }
   view.replaceChildren(...parts);
 }
-async function buildSession(id, refresh) {
+async function buildSession(id, refresh, opts = {}) {
   if (!CONFIG) CONFIG = await loadConfig();
   const D = await api("/api/sessions/" + encodeURIComponent(id));
-  const sel = new Set();            // "clip|version" marcadas para exportar
+  const sel = opts.sel || new Set();            // "clip|version" marcadas para exportar (en la galería global: "sesión||clip|versión")
   const chosen = {};                // clip -> versión mostrada
   const out = el("div", { id: "exportout" });
   const sess = D.session;
@@ -470,7 +581,7 @@ async function buildSession(id, refresh) {
           if (res.rating) D.ratings[rid] = res.rating; else delete D.ratings[rid]; draw(); } catch (e) { toast(e.message); }
       };
       const dl = (ext) => "/download/" + encodeURIComponent(id) + "/" + c.name + "/" + v.id + "/" + ext;
-      const key = c.name + "|" + v.id;
+      const key = (opts.prefix || "") + c.name + "|" + v.id;
       const conf = c.confidence;
       holder.replaceChildren(el("div", {}, video),
         el("div", {}, el("h3", { style: "margin-top:0" }, c.name + " · momento #" + c.rank, el("span", { class: "mut small" }, "  puntuación " + c.score + " (ranking heurístico, no una predicción)")),
@@ -500,7 +611,62 @@ async function buildSession(id, refresh) {
     return el("div", { class: "card" }, el("div", { class: "row" }, el("strong", {}, c.name), el("span", { class: "fix mut small" }, "Versión mostrada:"), el("div", { class: "fix" }, vsel)), holder);
   }
   list.replaceChildren(...(D.clips.length ? D.clips.map(clipCard) : [el("div", { class: "card mut" }, sess.status === "completed" ? "No se encontraron momentos que superen el umbral: no se generaron clips." : "Esta sesión no tiene clips (" + (STATUS[sess.status] || sess.status) + ").")]));
-  return el("div", { style: "display:grid;gap:14px" }, head, list);
+  return opts.compact ? list : el("div", { style: "display:grid;gap:14px" }, head, list);
+}
+async function viewAuto(view, id) {
+  if (!CONFIG) CONFIG = await loadConfig();
+  const A = await api("/api/auto/" + encodeURIComponent(id));
+  const refresh = () => viewAuto(view, id);
+  const sel = new Set(), cards = [];
+  let sort = "score", filt = "all";
+  const sum = A.summary || {};
+  const out = el("div", {}), listEl = el("div", { style: "display:grid;gap:14px" });
+  const sortSel = el("select", {}, el("option", { value: "score" }, "Ordenar por puntuación"), el("option", { value: "time" }, "Ordenar por momento del stream"));
+  const filtSel = el("select", {}, el("option", { value: "all" }, "Todos"), el("option", { value: "recommended" }, "Solo recomendados"), el("option", { value: "exploratory" }, "Solo exploratorios"));
+  async function doExport() {
+    const by = {};
+    for (const k of sel) { const [sid, rest] = k.split("||"); const [clip, version] = rest.split("|"); (by[sid] = by[sid] || []).push({ clip, version }); }
+    if (!Object.keys(by).length) { toast("Marcá al menos un clip para exportar."); return; }
+    const rows = [];
+    for (const [sid, selections] of Object.entries(by)) {
+      try { const r = await api("/api/sessions/" + encodeURIComponent(sid) + "/export", { selections }); rows.push(el("div", { class: "box" }, el("strong", {}, "Exportado en: "), r.folder, " ", el("button", { onclick: () => api("/api/open-folder", { path: r.folder }).catch((e) => toast(e.message)) }, "Abrir carpeta"))); }
+      catch (e) { rows.push(el("div", { class: "box err" }, e.message)); }
+    }
+    out.replaceChildren(...rows);
+  }
+  const head = el("div", { class: "card" }, el("h2", {}, A.job.title),
+    el("div", { class: "mut small" }, A.job.url), el("div", { class: "small" }, el("strong", {}, "Transmisión completa (automático)"), " · detección " + (DETECTOR[A.job.params.detector] || A.job.params.detector)
+      + " · objetivo " + A.job.params.target + " clips · " + hms(A.job.params.vod_duration) + " analizados en " + A.block_stats.length + " bloques"),
+    el("div", { class: "small", style: "margin-top:6px" }, A.clips.length + " clip(s) generados de " + A.planned + " planificados · " + (sum.recommended != null ? sum.recommended + " recomendados" : "")
+      + " · candidatos totales " + (sum.candidates_total != null ? sum.candidates_total : "?") + " · duplicados evitados " + (sum.duplicates_avoided != null ? sum.duplicates_avoided : "?")),
+    ...(A.notes || []).map((w) => el("div", { class: "box warn" }, "⚠ " + w)),
+    A.pending_render ? el("div", { class: "box warn" }, A.pending_render + " clip(s) todavía no se generaron (el trabajo está en curso, falló o se interrumpió). Volvé a «Nuevo → Trabajos» para continuar.") : null,
+    A.job.status === "completed" && A.exploratory_available ? el("div", { class: "box" }, "Hay " + A.exploratory_available + " candidato(s) EXPLORATORIOS (no alcanzan el umbral normal; menor confianza). ",
+      el("button", { onclick: async () => { try { await api("/api/auto/" + encodeURIComponent(id) + "/explore", { count: 5 }); toast("Generando 5 exploratorios: seguilo en «Nuevo → Trabajos»."); } catch (e) { toast(e.message, 6000); } } }, "Generar 5 clips exploratorios")) : null,
+    el("details", {}, el("summary", {}, "Detalle por bloque (tiempos y memoria medidos)"), el("div", { class: "small mut" }, ...A.block_stats.map((b) => el("div", {},
+      "Bloque " + (b.index + 1) + " · " + (SEG_STATUS[b.status] || b.status) + (b.candidates != null ? " · " + b.candidates + " candidatos (" + b.eligible + " elegibles) · descarga " + b.download_mb + " MB en " + b.download_s + " s · análisis " + b.seconds + " s · RAM pico " + b.peak_ram_mb + " MB" : ""))))),
+    el("div", { class: "row", style: "margin-top:10px" }, el("div", {}, sortSel), el("div", {}, filtSel),
+      el("button", { class: "primary fix", onclick: doExport }, "Exportar los clips marcados (MP4 + SRT)")), out);
+  function draw() {
+    const rows = cards.filter((c) => filt === "all" || c.meta.kind === filt).sort((a, b) => sort === "score" ? b.meta.score - a.meta.score : a.meta.start - b.meta.start);
+    listEl.replaceChildren(...(rows.length ? rows.map((c) => c.el) : [el("div", { class: "card mut" }, A.clips.length ? "Ningún clip coincide con el filtro." : "Todavía no hay clips generados.")]));
+  }
+  sortSel.addEventListener("change", () => { sort = sortSel.value; draw(); });
+  filtSel.addEventListener("change", () => { filt = filtSel.value; draw(); });
+  view.replaceChildren(head, listEl);
+  await Promise.all(A.clips.map(async (c) => {
+    const m = c.meta, exploratory = m.kind === "exploratory";
+    let body;
+    try { body = await buildSession(c.session.id, refresh, { compact: true, sel, prefix: c.session.id + "||" }); } catch (e) { body = el("div", { class: "box err" }, "No se pudo abrir este clip: " + e.message); }
+    const box = el("div", { class: "card", style: exploratory ? "border-color:var(--warn)" : "" },
+      el("div", { class: "row", style: "align-items:center" }, el("strong", { class: "fix" }, "#" + m.global_rank + " · " + hms(m.start) + " del stream"),
+        el("span", { class: "badge fix " + (exploratory ? "interrupted" : "completed") }, exploratory ? "Exploratorio (menor confianza)" : "Recomendado"),
+        el("span", { class: "mut small fix" }, "puntuación " + m.score + " · " + (DETECTOR[m.detector] || m.detector) + " · bloque " + (m.block + 1) + " · " + (m.top || []).join(", "))),
+      exploratory ? el("div", { class: "small warn" }, "No alcanza el umbral normal de calidad: revisalo con criterio antes de publicarlo.") : null, body);
+    cards.push({ meta: m, el: box });
+    draw();
+  }));
+  draw();
 }
 
 /* ---------- editor ---------- */

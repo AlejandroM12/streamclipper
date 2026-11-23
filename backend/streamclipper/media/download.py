@@ -484,7 +484,7 @@ def inspect_media(url: str, limits: DownloadLimits | None = None, ydl_factory: C
     out = {"platform": ref.platform, "platform_label": ref.label, "kind": ref.kind, "kind_label": ref.kind_label,
            "video_id": ref.video_id, "canonical_url": ref.canonical_url, "title": None, "duration": None, "uploader": None,
            "estimated_mb": None, "acceptable": False, "reason": None, "warnings": [],
-           "segmentable": False, "max_segments": MAX_SEGMENTS, "max_segment_s": int(limits.max_duration_s),
+           "segmentable": False, "auto": {"available": False}, "max_segments": MAX_SEGMENTS, "max_segment_s": int(limits.max_duration_s),
            "min_segment_s": MIN_SEGMENT_S}
     if ref.ignored_playlist:
         out["warnings"].append("La URL incluía una lista o colección: se ignora y se procesa solo el video indicado")
@@ -497,20 +497,32 @@ def inspect_media(url: str, limits: DownloadLimits | None = None, ydl_factory: C
         out["reason"] = explain_download_error(str(e))
         return out
     out.update(title=info.get("title"), duration=info.get("duration"), uploader=info.get("uploader") or info.get("channel"))
+    out["segmentable"] = is_segmentable(ref)
     try:
-        out["segmentable"] = is_segmentable(ref)
         est = check_info(info, limits, segmented=out["segmentable"])
         out["estimated_mb"] = round(est / 1e6) if est else None
         out["acceptable"] = True
     except InvalidInputError as e:
         out["reason"] = str(e)
+    if is_segmentable(ref, auto=True):      # transmisión completa: disponible aunque el video no entre como «video corto»
+        try:
+            check_info(info, limits, segmented=True)     # directos, privados, sin duración confiable… se rechazan igual
+            if not info.get("duration") or info["duration"] <= 60:
+                raise InvalidInputError("Es demasiado corto para el modo automático: usá «Video corto»")
+            from streamclipper.auto import TARGETS, estimates
+            out["auto"] = {"available": True, "targets": list(TARGETS), **estimates(info["duration"])}
+        except InvalidInputError as e:
+            out["auto"] = {"available": False, "reason": str(e)}
     return out
 
 
 # --- VOD por tramos ----------------------------------------------------------------------------
-def is_segmentable(ref: VideoRef) -> bool:
-    """Solo los VOD de Twitch y Kick se descargan por tramos (los clips y YouTube se descargan enteros)."""
-    return ref.platform in ("twitch", "kick") and ref.kind == "vod"
+def is_segmentable(ref: VideoRef, auto: bool = False) -> bool:
+    """Tramos manuales: solo VOD de Twitch y Kick. Con `auto` (transmisión completa) también videos de YouTube, que se descargan
+    por rangos igual (FFmpeg lee solo ese rango del flujo resuelto por yt-dlp)."""
+    if ref.platform in ("twitch", "kick") and ref.kind == "vod":
+        return True
+    return auto and ref.platform == "youtube" and ref.kind in ("watch", "short-link")
 
 
 def parse_hms(value) -> int:
@@ -634,8 +646,9 @@ def download_segment(
     cancel: CancelToken | None = None,
     progress: Callable[[str], None] | None = None,
     ydl_factory: Callable[[dict], object] | None = None,
+    auto: bool = False,
 ) -> DownloadResult:
-    """Descarga SOLO el rango [start, end] (segundos) de un VOD de Twitch o Kick.
+    """Descarga SOLO el rango [start, end] (segundos) de un VOD de Twitch o Kick (o, con `auto`, de un video largo de YouTube).
 
     yt-dlp resuelve el flujo HLS (sin cuentas ni cookies) y FFmpeg descarga únicamente ese rango con `-ss/-t` y copia de
     flujos (sin recodificar). Nunca se descarga el VOD completo: si FFmpeg no puede cortar el tramo, se informa el error.
@@ -645,7 +658,7 @@ def download_segment(
     cancel = cancel or CancelToken()
     progress = progress or (lambda _m: None)
     ref = parse_media_url(url)
-    if not is_segmentable(ref):
+    if not is_segmentable(ref, auto):
         raise InvalidInputError("Los tramos solo se pueden descargar de un VOD de Twitch o Kick")
     validate_segments([(start, end)], None, limits)
     length = end - start

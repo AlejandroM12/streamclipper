@@ -29,6 +29,15 @@ def has_trigger(c: Candidate, ctx: AnalysisContext) -> bool:
     return (by_name["intensidad_audio"].value >= 0.35 or by_name["reaccion_verbal"].value >= ctx.settings.text_trigger)
 
 
+def is_eligible(c: Candidate, ctx: AnalysisContext, scorer: CandidateScorer | None = None) -> bool:
+    """Cumple los criterios normales de calidad (umbral y señal propia), sin mirar solapes con otros candidatos.
+    Es lo que separa los «recomendados» de los «exploratorios» en el modo automático."""
+    fn = getattr(scorer, "eligible", None)
+    if fn is not None:
+        return bool(fn(c, ctx))
+    return c.score >= ctx.settings.min_score and has_trigger(c, ctx)
+
+
 def select_candidates(candidates: list[Candidate], ctx: AnalysisContext) -> list[Candidate]:
     """Selección voraz por puntuación, sin solapes excesivos ni textos repetidos.
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from streamclipper.app.state import (
-    ACTIVE, EDIT_STAGES, PROCESS_STAGES, SEGMENT_STAGES, AppJob, JobStore, Segment, make_stages,
+    ACTIVE, AUTO_JOB_STAGES, EDIT_STAGES, PROCESS_STAGES, SEGMENT_STAGES, AppJob, JobStore, Segment, make_stages, segment_stage_keys,
 )
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
@@ -124,7 +124,7 @@ class JobManager:
                 for seg in job.segments:   # los tramos terminados se conservan; el que estaba en curso se repetirá
                     if seg.status == "running":
                         seg.status, seg.message = "pending", "Interrumpido: se repetirá al continuar"
-                        seg.stages = make_stages(SEGMENT_STAGES)
+                        seg.stages = make_stages(segment_stage_keys(job))
                 self.store.save(job)
         cleanup_stale(self.settings)
 
@@ -192,6 +192,82 @@ class JobManager:
                      dup_key=dup_key, segments=segs, message=f"{len(segs)} tramo(s): "
                      + ", ".join(f"{format_hms(s)}–{format_hms(e)}" for s, e in spans))
         return self._enqueue(job)
+
+    def submit_auto(self, source: str, auto: dict, params: dict | None = None, force: bool = False) -> AppJob:
+        """Transmisión completa: planifica TODOS los bloques de la duración total y los encola como un único trabajo pesado."""
+        from streamclipper.auto import ANALYSIS_HEIGHT, BLOCK_S, MARGIN_S, TARGETS, estimates, plan_blocks
+        params = self._clean_params(params or {})
+        try:
+            target = int(auto.get("target", 15))
+        except (TypeError, ValueError):
+            raise ApiError(400, "La cantidad de clips objetivo debe ser un número.") from None
+        if not 1 <= target <= 30:
+            raise ApiError(400, f"El objetivo debe estar entre 1 y 30 clips (recomendado: {', '.join(map(str, TARGETS))}).")
+        explore = bool(auto.get("explore", False))
+        try:
+            block_s, margin_s = int(auto.get("block_s", BLOCK_S)), int(auto.get("margin_s", MARGIN_S))
+        except (TypeError, ValueError):
+            raise ApiError(400, "block_s y margin_s deben ser números.") from None
+        if not (30 <= block_s <= BLOCK_S and 0 <= margin_s <= 60):
+            raise ApiError(400, f"Tamaño de bloque inválido: block_s entre 30 y {BLOCK_S} s y margin_s entre 0 y 60 s.")
+        source = (source or "").strip()
+        try:
+            ref = parse_media_url(source)
+        except InvalidInputError as e:
+            raise ApiError(400, str(e)) from None
+        if not is_segmentable(ref, auto=True):
+            raise ApiError(400, "La transmisión completa solo está disponible para VOD de Twitch y Kick o videos largos de YouTube "
+                                "(no para clips ni directos).")
+        info = self.inspector(ref.canonical_url)
+        if not info.get("duration") or (info.get("auto") or {}).get("available") is False:
+            raise ApiError(400, (info.get("auto") or {}).get("reason") or info.get("reason") or "No se pudo obtener la duración de la transmisión.")
+        try:
+            blocks = plan_blocks(info["duration"], block_s, margin_s)
+        except InvalidInputError as e:
+            raise ApiError(400, str(e)) from None
+        dup_key = "|".join([f"auto:{ref.platform}:{ref.video_id}", str(target), str(explore), str(block_s), params["model"], str(params["language"]),
+                            params["layout"], params["detector"], str(params["smart_visual"] if params["detector"] == "smart" else "")])
+        self._check_duplicate(dup_key, force)
+        self._check_capacity()
+        title = info.get("title") or f"{ref.label} {ref.video_id}"
+        segs = [Segment(b.index, b.start, b.end, stages=make_stages(segment_stage_keys(AppJob(id="", kind="vod", params={"mode": "auto"}))),
+                        dl_start=b.dl_start, dl_end=b.dl_end) for b in blocks]
+        est = estimates(info["duration"], target, block_s, margin_s)
+        job = AppJob(id=AppJob.new_id(), kind="vod", title=title, input=ref.canonical_url, input_kind="vod",
+                     params={**params, "mode": "auto", "target": target, "explore": explore, "platform_name": ref.label, "vod_id": ref.video_id,
+                             "vod_duration": info["duration"], "uploader": info.get("uploader"), "block_s": block_s, "margin_s": margin_s,
+                             "analysis_height": ANALYSIS_HEIGHT},
+                     dup_key=dup_key, segments=segs, stages=make_stages(AUTO_JOB_STAGES),
+                     message=f"{len(segs)} bloques de {block_s // 60 if block_s >= 60 else block_s} {'min' if block_s >= 60 else 's'} para analizar {int(info['duration']) // 60} min; objetivo {target} clips",
+                     result={"estimates": est})
+        return self._enqueue(job)
+
+    def extend_auto(self, job_id: str, count: int) -> AppJob:
+        """Genera clips EXPLORATORIOS adicionales (de menor confianza) de un trabajo automático terminado, sin volver a analizar."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise ApiError(404, "No existe ese trabajo.")
+            if job.kind != "vod" or job.params.get("mode") != "auto" or job.status != "completed":
+                raise ApiError(409, "Solo se pueden agregar exploratorios a una transmisión automática ya terminada.")
+            left = job.result.get("exploratory", [])
+            if not left:
+                raise ApiError(409, "No quedan candidatos exploratorios disponibles.")
+            self._check_capacity()
+            count = max(1, min(int(count), len(left), 10))
+            plan = job.result.setdefault("plan", [])
+            for c in left[:count]:
+                plan.append(dict(c, kind="exploratory", global_rank=len(plan) + 1))
+            job.result["exploratory"] = left[count:]
+            for st in job.stages:
+                if st["key"] == "render_final":
+                    st.update(status="pending", fraction=None, detail="", seconds=None, started=None)
+            job.status, job.error, job.hint, job.finished_at = "queued", None, None, None
+            job.message = f"Generando {count} clip(s) exploratorio(s)"
+            self._tokens[job_id] = CancelToken()
+        self._save(job, force=True)
+        self._q.put(job_id)
+        return job
 
     def submit_edit(self, session: str, clip: str, params: dict) -> AppJob:
         dup_key = f"edit|{session}|{clip}"
@@ -305,7 +381,7 @@ class JobManager:
         from streamclipper.app.sessions import delete_session
         with self._lock:   # el candado impide que una edición nueva arranque sobre la sesión mientras se borra
             busy = [j for j in self._jobs.values() if j.status in ACTIVE
-                    and name in (j.session, j.params.get("session"), *(s.session for s in j.segments))]
+                    and name in (j.session, j.params.get("session"), *(s.session for s in j.segments), *j.result.get("rendered", {}).values())]
             if busy:
                 raise ApiError(409, "Esta sesión se está procesando o tiene una edición en curso. Cancelá el trabajo o esperá "
                                     "a que termine antes de eliminarla.")
@@ -318,13 +394,17 @@ class JobManager:
         with self._lock:
             job = self._jobs[job_id]
             todo = [s for s in job.segments if s.status != "done"]
-            if not todo:
+            stages_todo = [st for st in job.stages if st["status"] != "done"]
+            if not todo and not stages_todo:
                 raise ApiError(409, "Todos los tramos de este VOD ya están listos.")
             self._check_capacity()
             for s in todo:
-                s.reset()
+                s.reset(segment_stage_keys(job))
+            for st in stages_todo:
+                st.update(status="pending", fraction=None, detail="", seconds=None, started=None)
             job.status, job.error, job.hint, job.error_detail, job.finished_at = "queued", None, None, None, None
-            job.message = f"Continuando: {len(todo)} tramo(s) pendiente(s)"
+            job.message = (f"Continuando: {len(todo)} bloque(s) pendiente(s)" if job.params.get("mode") == "auto"
+                           else f"Continuando: {len(todo)} tramo(s) pendiente(s)")
             self._tokens[job_id] = CancelToken()
         self._save(job, force=True)
         self._q.put(job_id)
@@ -355,7 +435,10 @@ class JobManager:
         self._last_save[job.id] = now
         with self._lock:
             snapshot = AppJob.from_dict(job.to_dict())
-        self.store.save(snapshot)
+        try:
+            self.store.save(snapshot)
+        except OSError as e:   # un fallo al guardar el estado NO debe tumbar el hilo de trabajo (la próxima etapa vuelve a guardar)
+            log.warning("no se pudo guardar el estado de %s: %s", job.id, e)
 
     def _set_stage(self, job: "AppJob | Segment", key: str, status: str, fraction: float | None, detail: str,
                    root: AppJob | None = None) -> None:
@@ -374,7 +457,8 @@ class JobManager:
                 st["detail"] = detail
             job.message = f"{st['label']}" + (f": {detail}" if detail else "")
             if root is not None:
-                root.message = f"Tramo {job.index + 1} de {len(root.segments)} · {job.message}"
+                noun = "Bloque" if root.params.get("mode") == "auto" else "Tramo"
+                root.message = f"{noun} {job.index + 1} de {len(root.segments)} · {job.message}"
         self._save(root or job, force=status != "running" or fraction is None)
 
     # --- worker -------------------------------------------------------------------------------------

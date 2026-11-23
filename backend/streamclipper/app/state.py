@@ -20,10 +20,18 @@ STAGE_LABELS = {
     "renderizar": "Generar los clips",
     "verificar": "Verificar los clips",
     "preparar": "Preparar la edición",
+    "seleccion_global": "Elegir los mejores momentos de toda la transmisión",
+    "render_final": "Generar los clips elegidos",
 }
 PROCESS_STAGES = ["validar", "extraer_audio", "transcribir", "analizar_audio", "seleccionar", "renderizar", "verificar"]
 EDIT_STAGES = ["preparar", "renderizar", "verificar"]
 SEGMENT_STAGES = ["descarga"] + PROCESS_STAGES
+AUTO_BLOCK_STAGES = ["descarga", "validar", "extraer_audio", "transcribir", "analizar_audio", "seleccionar"]   # un bloque no renderiza
+AUTO_JOB_STAGES = ["seleccion_global", "render_final"]
+
+
+def segment_stage_keys(job) -> list[str]:
+    return AUTO_BLOCK_STAGES if (job.params or {}).get("mode") == "auto" else SEGMENT_STAGES
 
 
 @dataclass
@@ -53,13 +61,15 @@ class Segment:
     started_at: float | None = None
     finished_at: float | None = None
     result: dict = field(default_factory=dict)
+    dl_start: int = 0                 # modo automático: rango descargado (núcleo + contexto); start/end son el núcleo
+    dl_end: int = 0
 
     def stage(self, key: str) -> dict | None:
         return next((s for s in self.stages if s["key"] == key), None)
 
-    def reset(self) -> None:
+    def reset(self, keys: list[str] | None = None) -> None:
         self.status, self.error, self.hint, self.message = "pending", None, None, ""
-        self.stages = make_stages(SEGMENT_STAGES)
+        self.stages = make_stages(keys or SEGMENT_STAGES)
         self.started_at = self.finished_at = None
 
 
@@ -122,13 +132,24 @@ class JobStore:
         tmp = path.with_suffix(".tmp")
         with self._lock:
             tmp.write_text(json.dumps(job.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
-            os.replace(tmp, path)
+            for attempt in range(8):    # en Windows un antivirus o el indexador pueden bloquear el archivo un instante
+                try:
+                    os.replace(tmp, path)
+                    return
+                except PermissionError:
+                    if attempt == 7:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
 
     def load_all(self) -> list[AppJob]:
         jobs = []
         for p in sorted(self.root.glob("*.json")):
-            try:
-                jobs.append(AppJob.from_dict(json.loads(p.read_text(encoding="utf-8"))))
-            except (OSError, json.JSONDecodeError, TypeError):
-                continue   # un JSON dañado no impide arrancar
+            for attempt in range(5):
+                try:
+                    jobs.append(AppJob.from_dict(json.loads(p.read_text(encoding="utf-8"))))
+                    break
+                except PermissionError:
+                    time.sleep(0.05 * (attempt + 1))      # bloqueo transitorio: se reintenta
+                except (OSError, json.JSONDecodeError, TypeError):
+                    break   # un JSON dañado no impide arrancar
         return jobs

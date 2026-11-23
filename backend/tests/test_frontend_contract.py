@@ -170,7 +170,7 @@ def test_browser_loads_new_jobs_sessions_and_status_screens_with_old_sessions_pr
     assert sess["detector"] == "classic" and sess["segment"] is None and sess["reused_transcript"] is None   # compatibilidad hacia atrás
     base = f"http://127.0.0.1:{port}/"
     nuevo = _dom(base + "#/")
-    assert "Nuevo video" in nuevo and "Detección de momentos" in nuevo and "Hasta 20 min, 1500 MB y 1080p" in nuevo   # el texto que fallaba
+    assert "Nuevo video" in nuevo and "Detección de momentos" in nuevo and "hasta 20 min, 1500 MB y 1080p" in nuevo   # el texto que fallaba
     assert "Trabajos" in nuevo and "Todavía no procesaste" in nuevo
     sesiones = _dom(base + "#/sesiones")
     assert "Sesiones anteriores" in sesiones and "v.mp4" in sesiones and "Eliminar sesión" in sesiones
@@ -191,3 +191,90 @@ def test_browser_vod_segment_editor_still_appears_for_a_vod(running, monkeypatch
         "max_segments": 5, "max_segment_s": 1200, "min_segment_s": 10})
     assert json.loads(subprocess.run(["curl", "-s", "-X", "POST", "-H", "Content-Type: application/json", "-d", '{"url":"https://kick.com/a/videos/'
                                       '01a1fae2-a5c0-754b-888b-c05cc64e9741"}', f"http://127.0.0.1:{port}/api/inspect"], capture_output=True).stdout)["segmentable"]
+
+
+# --- transmisión completa (automático): interfaz con clics reales ---------------------------------------------------
+DRIVER = Path(__file__).parent / "cdp_driver.mjs"
+needs_ui = pytest.mark.skipif(CHROME is None or shutil.which("node") is None, reason="requiere Chrome y Node para operar la interfaz")
+
+
+def drive(url: str, steps: list[dict], read: str) -> dict:
+    spec = Path(tempfile.mkdtemp(prefix="sc-spec-")) / "spec.json"
+    spec.write_text(json.dumps({"url": url, "steps": steps, "read": read}), encoding="utf-8")
+    try:
+        out = subprocess.run(["node", str(DRIVER), CHROME, str(spec)], capture_output=True, timeout=150).stdout.decode("utf-8", "replace")
+    finally:
+        shutil.rmtree(spec.parent, ignore_errors=True)
+    res = json.loads(out.strip().splitlines()[-1])
+    assert res["ok"], res
+    return res["value"]
+
+
+def auto_info(duration=8 * 3600):
+    from streamclipper.auto import TARGETS, estimates
+    return {"platform": "kick", "platform_label": "Kick", "kind": "vod", "kind_label": "grabación (VOD)", "title": "Stream de 8 horas", "duration": duration,
+            "uploader": "u", "acceptable": True, "segmentable": True, "reason": None, "warnings": [], "estimated_mb": None, "max_segments": 5,
+            "max_segment_s": 1200, "min_segment_s": 10, "auto": {"available": True, "targets": list(TARGETS), **estimates(duration)}}
+
+
+@needs_ui
+def test_ui_automatic_mode_plans_24_blocks_and_starts_a_real_job(running, monkeypatch):
+    port, ctx, _ = running
+    info = auto_info()
+    monkeypatch.setattr(srv_mod, "inspect_media", lambda url, limits: info)
+    ctx.manager.inspector = lambda url: info
+    gate = threading.Event()
+    ctx.manager.runners["vod"] = lambda job, c: gate.wait(20)                     # el trabajo queda «en curso» sin tocar la red
+    url = "https://kick.com/xqc/videos/01a1fae2-a5c0-754b-888b-c05cc64e9741"
+    state = drive(f"http://127.0.0.1:{port}/#/", [
+        {"js": f"(() => {{ const i = document.querySelector('input[type=text]'); i.value = '{url}'; i.dispatchEvent(new Event('input')); }})()",
+         "wait": "document.body.innerText.includes('Tiempo estimado')"},
+        {"js": "(() => { const s = [...document.querySelectorAll('select')].find((x) => [...x.options].some((o) => o.value === '20')); s.value = '20'; s.dispatchEvent(new Event('change')); })()"},
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Procesar').click()",
+         "wait": "document.querySelector('#jobs') && document.querySelector('#jobs').innerText.includes('Bloques completados')"},
+    ], "({ text: document.querySelector('#view').innerText, mode: [...document.querySelectorAll('select')][0].value })")
+    gate.set()
+    text = state["text"]
+    assert "24 bloques de 20 min" in text and "01:00:00" not in text.split("Se analizará")[0]                       # modo elegido solo para un stream largo
+    assert "Bloques completados: 0 de 24 (0 %)" in text and "objetivo 20 clips" in text and "Detección Clásica" in text   # clásico por defecto
+    assert "Cantidad de clips" not in text.split("Trabajos")[0]                                                    # el objetivo reemplaza a «cantidad de clips»
+    jobs = json.loads(get(port, "/api/jobs"))["jobs"]
+    assert jobs[0]["params"]["mode"] == "auto" and len(jobs[0]["segments"]) == 24 and jobs[0]["params"]["detector"] == "classic"
+
+
+@needs_ui
+def test_ui_manual_modes_still_work_for_a_vod_and_a_short_video(running, monkeypatch):
+    port, ctx, _ = running
+    monkeypatch.setattr(srv_mod, "inspect_media", lambda url, limits: auto_info(2 * 3600))
+    url = "https://kick.com/xqc/videos/01a1fae2-a5c0-754b-888b-c05cc64e9741"
+    text = drive(f"http://127.0.0.1:{port}/#/", [
+        {"js": f"(() => {{ const i = document.querySelector('input[type=text]'); i.value = '{url}'; i.dispatchEvent(new Event('input')); }})()",
+         "wait": "document.body.innerText.includes('Tiempo estimado')"},
+        {"js": "(() => { const s = document.querySelector('select'); s.value = 'segments'; s.dispatchEvent(new Event('change')); })()",
+         "wait": "document.body.innerText.includes('Tramos a procesar')"},
+    ], "document.querySelector('#view').innerText")
+    assert "Tramos a procesar" in text and "Agregar tramo" in text and "Tiempo estimado" not in text           # tramos manuales intactos
+    short = dict(auto_info(300), segmentable=False, auto={"available": False})
+    monkeypatch.setattr(srv_mod, "inspect_media", lambda url, limits: short)
+    text = drive(f"http://127.0.0.1:{port}/#/", [
+        {"js": "(() => { const i = document.querySelector('input[type=text]'); i.value = 'https://www.youtube.com/watch?v=aqz-KE-bpKQ'; i.dispatchEvent(new Event('input')); })()",
+         "wait": "document.body.innerText.includes('Cumple los límites')"}], "document.querySelector('#view').innerText")
+    assert "Modo de procesamiento" not in text and "Cantidad de clips" in text                                     # video corto: formulario de siempre
+
+
+@needs_ui
+def test_ui_auto_gallery_and_sessions_hide_analysis_sessions_and_group_final_clips(running):
+    port, _, cfg = running
+    _old_format_session(cfg, "20250101-000000-small-viejo")
+    for name, meta in (("20261121-b0", {"group": "G1", "mode": "auto-block", "index": 0}),
+                       ("20261121-c0", {"group": "G1", "mode": "auto-clip", "global_rank": 1, "kind": "recommended", "score": 0.5, "start": 100, "end": 120,
+                                        "vod_title": "Stream largo", "platform": "kick", "detector": "classic", "block": 0, "index": 0, "count": 1,
+                                        "start_hms": "00:01:40", "end_hms": "00:02:00", "top": []})):
+        d = cfg.jobs_dir / name
+        (d / "out").mkdir(parents=True)
+        (d / "result.json").write_text(json.dumps({"job_id": name, "status": "completed", "source": "x.mp4", "candidates": [], "clips": [], "settings": {}, "media": {"duration": 60}}))
+        (d / "segment.json").write_text(json.dumps(meta))
+    text = drive(f"http://127.0.0.1:{port}/#/sesiones", [{"wait": "document.body.innerText.includes('Transmisión completa')"}], "document.querySelector('#view').innerText")
+    assert "Stream largo" in text and "1 clip(s) final(es): 1 recomendados, 0 exploratorios · 1 bloque(s) analizados" in text
+    assert text.count("Eliminar transmisión") == 1 and "v.mp4" in text                                          # la sesión antigua sigue visible, el análisis oculto
+    assert "20261121-b0" not in text

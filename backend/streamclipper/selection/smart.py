@@ -201,6 +201,12 @@ class SmartScorer:
         c.components = comps
         c.score = float(max(0.0, sum(x.contribution for x in comps)))
 
+    def eligible(self, c: Candidate, ctx: AnalysisContext) -> bool:
+        if self._info.get("effective", "").startswith("clásico"):
+            return c.score >= ctx.settings.min_score and has_trigger(c, ctx)
+        by = {x.name: x.value for x in c.components}
+        return c.score >= ctx.settings.min_score and bool(has_trigger(c, ctx) or by.get("reaccion_vocal", 0) >= 0.5 or by.get("risa_probable", 0) >= 0.5)
+
     # --- selección: sin duplicados prácticos --------------------------------------------------------------
     def select(self, candidates: list[Candidate], ctx: AnalysisContext) -> list[Candidate]:
         cfg, chosen = ctx.settings, []

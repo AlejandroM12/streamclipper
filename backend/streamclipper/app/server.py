@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from streamclipper import __version__
 from streamclipper.app.manager import DETECTORS, LANGUAGES, LAYOUTS, MODELS, JobManager
 from streamclipper.app.runners import session_dir
-from streamclipper.app.sessions import group_detail, list_sessions, rating_item, session_detail
+from streamclipper.app.sessions import auto_detail, group_detail, list_sessions, rating_item, session_detail
 from streamclipper.core.config import Settings
 from streamclipper.core.errors import InvalidInputError, StreamClipperError
 from streamclipper.doctor import model_cached, run_doctor
@@ -38,7 +38,7 @@ VIDEO_EXT = (".mp4", ".mkv", ".mov", ".webm")
 _STATIC = Path(__file__).parent / "static" / "index.html"
 # Versión del contrato entre la página y la API (/api/config, /api/inspect…). Súbela al cambiar el formato de lo que la página lee.
 # La página y la API salen del MISMO proceso, y la página verifica que coincidan (ver loadConfig en index.html).
-API_CONTRACT = 4
+API_CONTRACT = 5
 
 
 def pick_file_dialog() -> str:
@@ -76,7 +76,8 @@ class AppContext:
 
     def active_sessions(self) -> set[str]:
         return ({j["session"] for j in self.manager.active() if j.get("session")}
-                | {sg["session"] for j in self.manager.active() for sg in j.get("segments", []) if sg.get("session")})
+                | {sg["session"] for j in self.manager.active() for sg in j.get("segments", []) if sg.get("session")}
+                | {v for j in self.manager.active() for v in (j.get("result") or {}).get("rendered", {}).values()})
 
     def session(self, name: str) -> Path:
         try:
@@ -144,6 +145,8 @@ def make_handler(ctx: AppContext):
                     return send_json(self, ctx.manager.get(m.group(1)))
                 if path == "/api/sessions":
                     return send_json(self, {"sessions": list_sessions(s, ctx.active_sessions())})
+                if m := re.fullmatch(r"/api/auto/([\w-]+)", path):
+                    return send_json(self, auto_detail(s, ctx.manager.get(m.group(1)), ctx.active_sessions()))
                 if m := re.fullmatch(r"/api/groups/([\w-]+)", path):
                     return send_json(self, group_detail(s, m.group(1), ctx.active_sessions()))
                 if m := re.fullmatch(r"/api/sessions/([\w.-]+)", path):
@@ -162,6 +165,11 @@ def make_handler(ctx: AppContext):
                 raise ApiError(404, "no encontrado")
             # POST
             body = read_json_body(self)
+            if path == "/api/jobs" and body.get("auto") is not None:
+                job = ctx.manager.submit_auto(body.get("source", ""), body["auto"] or {}, body.get("params") or {}, bool(body.get("force")))
+                return send_json(self, job.to_dict(), 201)
+            if m := re.fullmatch(r"/api/auto/([\w-]+)/explore", path):
+                return send_json(self, ctx.manager.extend_auto(m.group(1), int(body.get("count", 5))).to_dict(), 201)
             if path == "/api/jobs" and body.get("segments") is not None:
                 job = ctx.manager.submit_vod(body.get("source", ""), body["segments"], body.get("params") or {}, bool(body.get("force")))
                 return send_json(self, job.to_dict(), 201)

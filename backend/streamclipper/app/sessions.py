@@ -62,6 +62,25 @@ def group_detail(settings: Settings, group: str, active: set[str] | None = None)
     return {"id": group, "title": first["vod_title"], "url": first["url"], "platform": first["platform"], "segments": segs}
 
 
+def auto_detail(settings: Settings, job: dict, active: set[str] | None = None) -> dict:
+    """Galería global de una transmisión completa: los clips finales de todos los bloques, con su tiempo en el stream."""
+    sessions = [s for s in list_sessions(settings, active) if (s.get("segment") or {}).get("group") == job["id"]]
+    clips = sorted((s for s in sessions if s["segment"].get("mode") == "auto-clip"), key=lambda s: s["segment"]["global_rank"])
+    blocks = [s["id"] for s in sessions if s["segment"].get("mode") == "auto-block"]
+    res = job.get("result") or {}
+    plan = res.get("plan", [])
+    rendered = res.get("rendered", {})
+    return {
+        "job": {"id": job["id"], "title": job["title"], "url": job["input"], "status": job["status"], "params": job["params"],
+                "created_at": job["created_at"], "error": job.get("error")},
+        "summary": res.get("summary"), "notes": res.get("notes", []), "scales": res.get("scales"), "estimates": res.get("estimates"),
+        "clips": [{"session": s, "meta": s["segment"]} for s in clips], "blocks": blocks,
+        "planned": len(plan), "rendered": len(rendered), "pending_render": sum(1 for it in plan if it["id"] not in rendered),
+        "exploratory_available": len(res.get("exploratory", [])),
+        "block_stats": [{"index": sg["index"], **(sg.get("result") or {}), "status": sg["status"]} for sg in job.get("segments", [])],
+    }
+
+
 def summarize(d: Path, result: dict, active: set[str]) -> dict:
     status = result.get("status", "?")
     if status == "running":   # un job que quedó «running» en disco y no está activo se interrumpió
@@ -80,6 +99,8 @@ def summarize(d: Path, result: dict, active: set[str]) -> dict:
         "legacy": legacy, "segment": read_segment_meta(d),
         "detector": (result.get("detector") or {}).get("requested") or result.get("settings", {}).get("detector") or "classic",
         "reused_transcript": result.get("transcript_reused_from"),
+        "mode": (read_segment_meta(d) or {}).get("mode"),
+        "hidden": (read_segment_meta(d) or {}).get("mode") == "auto-block",      # sesiones de solo análisis del modo automático
     }
 
 
