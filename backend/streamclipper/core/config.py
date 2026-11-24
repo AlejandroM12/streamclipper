@@ -80,7 +80,8 @@ class Settings:
     sub_font_size: int = 68
     sub_mark_low_conf: bool = False         # colorear palabras de baja confianza (útil para revisar, no para publicar)
     # render
-    layout: str = "blur-fit"  # blur-fit | focus | fill | crop
+    layout: str = "blur-fit"  # blur-fit | focus | fill | crop | stack
+    composition: dict | None = None         # stack: regiones por rol (render/compose.py)
     crop_x: float = 0.5
     crop_y: float = 0.5
     zoom: float = 1.0
@@ -125,7 +126,7 @@ class Settings:
             raise InvalidInputError(f"Preset de duración desconocido: {self.clip_preset}")
         if self.detector not in ("classic", "smart"):
             raise InvalidInputError(f"Detector desconocido: {self.detector} (classic o smart)")
-        if self.layout not in ("blur-fit", "focus", "fill", "crop"):
+        if self.layout not in ("blur-fit", "focus", "fill", "crop", "stack"):
             raise InvalidInputError(f"Layout desconocido: {self.layout}")
         if not (0 <= self.crop_x <= 1 and 0 <= self.crop_y <= 1 and 1 <= self.zoom <= 4):
             raise InvalidInputError("crop_x/crop_y en [0,1] y zoom en [1,4]")

@@ -33,6 +33,7 @@ class Layout:
     sub_line_chars: int
     sub_block_h: int
     framing: dict = field(default_factory=dict, compare=False)   # qué se recorta y si se respetan las regiones a conservar
+    panels: tuple = ()                 # stack: regiones recortadas y su lugar en el lienzo (ver render/compose.py)
 
 
 def _even(v: float) -> int:
@@ -83,6 +84,9 @@ def _framing(layout: str, src_w: int, src_h: int, cw: int, cx: int, zoom_req: fl
 
 
 def compute_layout(src_w: int, src_h: int, cfg) -> Layout:
+    if cfg.layout == "stack":
+        from streamclipper.render.compose import compute_stack
+        return compute_stack(src_w, src_h, cfg)
     m = SAFE_MARGINS[cfg.safe_platform]
     chars = cfg.sub_line_chars or line_chars(cfg.sub_font_size, m["left"], m["right"])
     block_h = math.ceil(cfg.sub_font_size * 1.18 * cfg.sub_max_lines) + 12

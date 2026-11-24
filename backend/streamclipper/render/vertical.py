@@ -5,6 +5,7 @@ Presets (`layout`):
 - focus:    acerca el gameplay recortando los costados (fg_zoom, fg_x); más grande, pero oculta los bordes.
 - fill:     cubre todo el lienzo recortando (no hay fondo).
 - crop:     como fill, con posición y zoom manuales.
+- stack:    composición por regiones (cámaras arriba, contenido abajo...), ver render/compose.py.
 """
 from pathlib import Path
 
@@ -16,10 +17,14 @@ from streamclipper.media.ffmpeg import run_cancellable
 from streamclipper.render.layout import H, W, Layout, compute_layout
 
 
-def build_filter(settings: Settings, ass_name: str, layout: Layout | None = None) -> str:
-    """Grafo de filtros. `ass_name` es relativo al cwd de FFmpeg (evita escapes de rutas de Windows)."""
+def build_filter(settings: Settings, ass_name: str | None, layout: Layout | None = None) -> str:
+    """Grafo de filtros. `ass_name` es relativo al cwd de FFmpeg (evita escapes de rutas de Windows); None = sin subtítulos
+    (previsualizaciones)."""
     layout = layout or compute_layout(1920, 1080, settings)
-    tail = f"setsar=1,fps={settings.output_fps},ass={ass_name},format=yuv420p"
+    tail = f"setsar=1,fps={settings.output_fps}," + (f"ass={ass_name}," if ass_name else "") + "format=yuv420p"
+    if layout.panels:
+        from streamclipper.render.compose import stack_filter
+        return stack_filter(layout, settings, tail)
     if layout.fg is None:  # fill / crop: cubre el lienzo con posición y zoom manuales
         zoom = 1.0 if settings.layout == "fill" else settings.zoom
         cx, cy = (0.5, 0.5) if settings.layout == "fill" else (settings.crop_x, settings.crop_y)

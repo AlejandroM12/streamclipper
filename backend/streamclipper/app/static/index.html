@@ -44,6 +44,18 @@ details{margin:6px 0}summary{cursor:pointer;color:var(--acc)}.tx{white-space:pre
 .cuerow{display:grid;grid-template-columns:64px 64px 1fr auto;gap:6px;align-items:start;margin:4px 0}.cuerow input{padding:4px 6px}
 .cuerow.low textarea{border-color:var(--warn)}
 .floatjob{position:fixed;right:16px;bottom:16px;width:min(440px,calc(100vw - 32px));max-height:70vh;overflow:auto;background:var(--card);border:1px solid var(--acc);border-radius:12px;padding:12px;z-index:60;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+.tl{position:relative;height:96px;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;touch-action:none;margin-top:6px;cursor:crosshair}
+.tl canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.tl .ov{position:absolute;top:0;bottom:0;pointer-events:none}
+.tl .o-orig{background:rgba(150,150,150,.22);top:62%}.tl .o-ctx{border:2px solid #3e63dd;top:2px;bottom:36%;border-radius:3px}
+.tl .o-ev{background:rgba(229,72,77,.28);top:0;bottom:70%}.tl .o-sel{background:rgba(48,164,108,.2);border-left:2px solid #30a46c;border-right:2px solid #30a46c}
+.tl .h{width:14px;margin-left:-7px;background:#30a46c;opacity:.9;pointer-events:auto;cursor:ew-resize;border-radius:4px}
+.tl .o-head{width:2px;background:var(--fg);opacity:.8}
+.tl .ticks{position:absolute;left:0;right:0;bottom:0;height:12px;pointer-events:none}.tl .ticks i{position:absolute;top:0;bottom:0;background:rgba(62,99,221,.5);border-right:1px solid var(--card)}
+.lg{display:inline-block;width:12px;height:10px;border-radius:2px;margin:0 4px 0 6px;vertical-align:middle}.lg.g1{background:#30a46c}.lg.g2{background:#999}.lg.g3{border:2px solid #3e63dd}.lg.g4{background:#e5484d}
+.regbox{position:relative;display:inline-block;max-width:100%;margin-top:6px;cursor:crosshair;touch-action:none;user-select:none}.regbox img{display:block;max-width:100%;border-radius:6px}
+.regbox .rects{position:absolute;inset:0;pointer-events:none}.regbox .rect{position:absolute;border:2px solid;font-size:11px;font-weight:700;background:rgba(0,0,0,.12)}
+img.pv{width:100%;max-width:300px;border-radius:8px;border:1px solid var(--line);display:block;margin:4px 0}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:9px 16px;border-radius:10px;z-index:99;max-width:90vw}
 </style>
 </head>
@@ -609,7 +621,7 @@ async function buildSession(id, refresh, opts = {}) {
           el("div", { class: "rate" }, ...Object.entries(D.labels).map(([k, label]) => el("button", { class: k + (rt.rating === k ? " on" : ""), onclick: rate(rt.rating === k ? null : k) }, label))),
           note,
           el("div", { class: "row", style: "margin-top:8px" },
-            el("button", { class: "fix", onclick: () => openEditor(D, c, v, refresh) }, "Editar inicio, final y subtítulos"),
+            el("button", { class: "fix", onclick: () => openEditor(D, c, v, refresh) }, "Editar clip"),
             el("button", { class: "fix", title: "Busca el contexto anterior y posterior y propone un clip que se entienda solo; el original se conserva", onclick: () => openContext(D, c, v, refresh) }, "Ampliar con contexto"),
             el("a", { href: dl("mp4"), class: "fix" }, el("button", { type: "button" }, "Descargar MP4")), el("a", { href: dl("srt"), class: "fix" }, el("button", { type: "button" }, "Descargar SRT")),
             el("label", { class: "fix", style: "display:flex;gap:6px;align-items:center;margin:0" }, el("input", { type: "checkbox", style: "width:auto", checked: sel.has(key), onchange: (ev) => { if (ev.target.checked) sel.add(key); else sel.delete(key); } }), "Exportar")),
@@ -804,25 +816,176 @@ function openContext(D, clip, version, onDone) {
 }
 
 /* ---------- editor ---------- */
-function openEditor(D, clip, version, onDone) {
-  const id = D.session.id;
-  const sourceOk = D.has_source;
-  let cues = null, loadedFor = null, dirty = false;
-  const start = el("input", { type: "number", step: "0.1", value: version.start }), end = el("input", { type: "number", step: "0.1", value: version.end });
-  const dur = el("div", { class: "small mut" });
-  const preset = el("select", {}, ...[["", "Igual que la sesión"], ["seguro", "Seguro: cuadro completo (blur-fit)"], ["gameplay", "Gameplay más grande (focus)"], ["pantalla", "Pantalla completa (recorta)"]].map(([v, l]) => el("option", { value: v }, l)));
-  const zoom = el("input", { type: "number", step: "0.05", min: 1, max: 2.5, value: 1.2 }), fgx = el("input", { type: "number", step: "0.05", min: 0, max: 1, value: 0.5 });
-  const keep = el("input", { type: "text", placeholder: "0,0,0.25,0.4;0.77,0.08,0.2,0.32" });
-  const focusBox = el("div", { class: "row", style: "display:none" }, el("div", {}, el("label", {}, "Zoom máximo"), zoom), el("div", {}, el("label", {}, "Posición horizontal (0 izq. – 1 der.)"), fgx),
-    el("div", {}, el("label", {}, "Regiones a no recortar (x,y,w,h; separadas por «;»)"), keep));
-  preset.addEventListener("change", () => { focusBox.style.display = preset.value === "gameplay" ? "" : "none"; });
-  const cueBox = el("div", {}), msg = el("div"), progress = el("div");
-  const src = sourceOk ? el("video", { controls: true, preload: "metadata", src: "/source/" + encodeURIComponent(id) + "#t=" + Math.max(0, version.start - 2) }) : el("div", { class: "box warn" }, "El video original ya no está en su ubicación: no se pueden cambiar los tiempos.");
-  const updDur = () => { const d = Number(end.value) - Number(start.value); dur.textContent = "Duración: " + (isFinite(d) ? d.toFixed(1) : "?") + " s" + (d < 3 ? " (mínimo 3 s)" : d > 60 ? " (máximo 60 s)" : (d < 8 || d > 30) ? " (fuera del rango habitual de 8–30 s)" : ""); };
-  start.addEventListener("input", updDur); end.addEventListener("input", updDur); updDur();
-  let previewTimer = null;
-  const preview = () => { if (!sourceOk) return; src.currentTime = Number(start.value); src.play(); clearInterval(previewTimer); previewTimer = setInterval(() => { if (src.currentTime >= Number(end.value)) { src.pause(); clearInterval(previewTimer); } }, 100); };
-  function cueRow(c, i) {
+/* ---------- editor de clips (1.5) ---------- */
+const COMP_SLOTS = {
+  original: [],
+  gameplay: [["main", "Juego"]],
+  reacciones: [["cam0", "Cámara 1"], ["cam1", "Cámara 2 (opcional)"], ["cam2", "Cámara 3 (opcional)"], ["main", "Contenido principal"]],
+  podcast: [["cam0", "Participante 1"], ["cam1", "Participante 2"], ["cam2", "Participante 3 (opcional)"], ["cam3", "Participante 4 (opcional)"], ["main", "Contenido (opcional)"]],
+  personalizado: [["r0a", "Fila 1 · región A"], ["r0b", "Fila 1 · región B (opcional)"], ["r1a", "Fila 2 · región A"], ["r1b", "Fila 2 · región B (opcional)"], ["r2a", "Fila 3 · región A"], ["r2b", "Fila 3 · región B (opcional)"]],
+};
+const COMP_NAMES = { original: "Original (cuadro completo con fondo desenfocado)", gameplay: "Gameplay: priorizar el juego", reacciones: "Reacciones: cámara arriba y contenido abajo",
+  podcast: "Podcast / conversación: priorizar participantes", personalizado: "Personalizado: elegir las regiones a mano" };
+const COMP_HELP = {
+  original: "Muestra todo el cuadro, pero chico. Sirve cuando no hay nada que destacar.",
+  gameplay: "Arrastrá sobre el fotograma para marcar la zona del juego: se recorta a ella y se agranda. Sin región se usa el recorte horizontal de siempre.",
+  reacciones: "Marcá la(s) cámara(s) y el contenido principal (juego, pregunta, pantalla). Las cámaras van arriba, lado a lado; el contenido abajo.",
+  podcast: "Marcá a cada participante (y el contenido si lo hay). Se muestran uno sobre otro (o en rejilla si son 3-4).",
+  personalizado: "Hasta tres filas de hasta dos regiones. Cada fila se ajusta al ancho; las filas se apilan de arriba hacia abajo.",
+};
+const SLOT_COLORS = ["#e5484d", "#f5a524", "#30a46c", "#3e63dd", "#ab4aba", "#00a2c7"];
+const compOf = (preset, regs) => {
+  const g = (k) => regs[k] || null;
+  if (preset === "original") return { preset };
+  if (preset === "gameplay") return { preset, main: g("main") };
+  if (preset === "reacciones") return { preset, cams: ["cam0", "cam1", "cam2"].map(g).filter(Boolean), main: g("main") };
+  if (preset === "podcast") return { preset, cams: ["cam0", "cam1", "cam2", "cam3"].map(g).filter(Boolean), main: g("main") };
+  return { preset, rows: [["r0a", "r0b"], ["r1a", "r1b"], ["r2a", "r2b"]].map((row) => row.map(g).filter(Boolean)).filter((r) => r.length) };
+};
+
+async function openEditor(D, clip, version, onDone) {
+  const id = D.session.id, base = "/api/sessions/" + encodeURIComponent(id);
+  let E;
+  try { E = await api(base + "/editor?clip=" + encodeURIComponent(clip.name)); } catch (e) { toast(e.message, 6000); return; }
+  const modal = el("div", { class: "modal" }), dlg = el("div", { class: "dlg" });
+  modal.append(dlg); document.body.append(modal);
+  const close = () => { clearTimeout(prevTimer); if (vid) vid.pause(); modal.remove(); };
+  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+  if (!E.available) {
+    dlg.append(el("h2", {}, "Editar " + clip.name), el("div", { class: "box err" }, E.reason), el("div", { class: "row" }, el("button", { onclick: close }, "Cerrar")));
+    return;
+  }
+  const abs = (t) => E.offset_abs != null ? " · VOD " + hms(E.offset_abs + t) : "";
+  const fmt = (t) => (t < 0 ? "-" : "") + Math.floor(Math.abs(t) / 60) + ":" + (Math.abs(t) % 60).toFixed(1).padStart(4, "0");
+  const verOpt = E.versions.find((v) => v.id === version.id);
+  const initial = verOpt ? [verOpt.start, verOpt.end] : E.original;
+  let sel = [initial[0], initial[1]], view = [0, E.duration], cues = null, loadedFor = null, dirty = false, prevTimer = null, vid = null, snap = true;
+  const sents = E.sentences || [];
+
+  // --- video y línea de tiempo ---
+  vid = el("video", { controls: true, preload: "metadata", src: E.media + "#t=" + Math.max(0, sel[0]), style: "max-height:340px;width:100%;background:#000" });
+  const cv = el("canvas", {}), tl = el("div", { class: "tl" }, cv);
+  const ov = (cls, title) => { const d = el("div", { class: "ov " + cls, title: title || "" }); tl.append(d); return d; };
+  const oOrig = ov("o-orig", "Intervalo del clip original"), oCtx = ov("o-ctx", "Intervalo propuesto con contexto"), oEv = ov("o-ev", "Momento principal detectado"),
+    oSel = ov("o-sel", "Intervalo actual"), hS = ov("h h-s", "Inicio (arrastrar)"), hE = ov("h h-e", "Final (arrastrar)"), oHead = ov("o-head", "");
+  const ticks = el("div", { class: "ticks" }); tl.append(ticks);
+  const x2p = (t) => ((t - view[0]) / (view[1] - view[0]) * 100);
+  const place = (d, a, b) => { if (a == null) { d.style.display = "none"; return; } const l = Math.max(0, x2p(a)), r = Math.min(100, x2p(b)); d.style.display = r > l ? "" : "none"; d.style.left = l + "%"; d.style.width = Math.max(0.15, r - l) + "%"; };
+  function drawTl() {
+    const w = tl.clientWidth || 900, h = 96; cv.width = w; cv.height = h;
+    const g = cv.getContext("2d"); g.clearRect(0, 0, w, h);
+    const hop = E.wave_hop, W_ = E.waveform || [];
+    g.fillStyle = "rgba(120,130,150,.55)";
+    for (let px = 0; px < w; px++) {
+      const t = view[0] + px / w * (view[1] - view[0]), i = Math.floor(t / hop), v = W_[i] || 0;
+      const bh = Math.max(1, v * (h - 26)); g.fillRect(px, h - 14 - bh, 1, bh);
+    }
+    ticks.replaceChildren(...sents.filter((s) => s[1] > view[0] && s[0] < view[1]).slice(0, 400).map((s) => { const d = el("i", { title: s[2] }); d.style.left = x2p(s[0]) + "%"; d.style.width = Math.max(0.1, x2p(s[1]) - x2p(s[0])) + "%"; return d; }));
+    place(oOrig, E.original[0], E.original[1]); place(oCtx, E.contextual && E.contextual[0], E.contextual && E.contextual[1]); place(oEv, E.event && E.event[0], E.event && E.event[1]); place(oSel, sel[0], sel[1]);
+    hS.style.left = x2p(sel[0]) + "%"; hE.style.left = x2p(sel[1]) + "%";
+    oHead.style.left = x2p(vid.currentTime || 0) + "%";
+    viewLbl.textContent = "Vista: " + fmt(view[0]) + " – " + fmt(view[1]) + " de " + fmt(E.duration);
+  }
+  const viewLbl = el("span", { class: "mut small" });
+  const tAt = (ev) => { const r = tl.getBoundingClientRect(); return Math.min(view[1], Math.max(view[0], view[0] + (ev.clientX - r.left) / r.width * (view[1] - view[0]))); };
+  let drag = null;
+  for (const [h, which] of [[hS, 0], [hE, 1]]) h.addEventListener("pointerdown", (ev) => { drag = which; try { h.setPointerCapture(ev.pointerId); } catch (e) { /* puntero sintético */ } ev.stopPropagation(); });
+  tl.addEventListener("pointermove", (ev) => { if (drag == null) return; setSel(drag, snapTo(tAt(ev), drag)); });
+  tl.addEventListener("pointerup", () => { drag = null; });
+  tl.addEventListener("click", (ev) => { if (ev.target.classList.contains("h")) return; vid.currentTime = tAt(ev); });
+  vid.addEventListener("timeupdate", () => { oHead.style.left = x2p(vid.currentTime) + "%"; });
+  function snapTo(t, which) {
+    if (!snap || !sents.length) return t;
+    let best = t, bd = 0.6;
+    for (const s of sents) { const c = which === 0 ? s[0] : s[1], d = Math.abs(c - t); if (d < bd) { bd = d; best = c; } }
+    return best;
+  }
+  const inS = el("input", { type: "number", step: "0.1" }), inE = el("input", { type: "number", step: "0.1" }), info = el("div", { class: "small" });
+  function setSel(which, v) {
+    v = Math.round(Math.min(E.duration, Math.max(0, v)) * 100) / 100;
+    if (which === 0) sel[0] = Math.min(v, sel[1] - 0.5); else sel[1] = Math.max(v, sel[0] + 0.5);
+    refreshSel();
+  }
+  function refreshSel() {
+    inS.value = sel[0].toFixed(2); inE.value = sel[1].toFixed(2);
+    const d = sel[1] - sel[0], ev = E.event || E.original;
+    const keeps = sel[0] <= ev[0] + 0.01 && sel[1] >= ev[1] - 0.01;
+    info.replaceChildren(...[el("strong", {}, "Duración " + d.toFixed(1) + " s"), "  ·  clip " + fmt(sel[0]) + " – " + fmt(sel[1]) + abs(sel[0]) + (E.offset_abs != null ? "–" + hms(E.offset_abs + sel[1]) : ""),
+      d < 3 ? el("div", { class: "warn" }, "Mínimo 3 s.") : d > 90 ? el("div", { class: "warn" }, "Máximo 90 s.") : null,
+      keeps ? null : el("div", { class: "warn" }, "⚠ El intervalo no incluye completo el momento principal detectado.")].filter(Boolean));
+    drawTl();
+    drawFrameRects();
+  }
+  inS.addEventListener("change", () => setSel(0, Number(inS.value))); inE.addEventListener("change", () => setSel(1, Number(inE.value)));
+  const ctl = (label, fn, title) => el("button", { class: "fix", title: title || "", onclick: fn }, label);
+  const snapSents = () => {
+    const a = sents.find((s) => s[0] <= sel[0] && sel[0] < s[1]), b = sents.find((s) => s[0] < sel[1] && sel[1] <= s[1]);
+    if (a) sel[0] = a[0]; if (b) sel[1] = b[1]; refreshSel();
+  };
+  const prevPlay = () => { vid.currentTime = sel[0]; vid.play(); clearInterval(prevTimer); prevTimer = setInterval(() => { if (vid.currentTime >= sel[1]) { vid.pause(); clearInterval(prevTimer); } }, 100); };
+  const reset = () => { sel = [E.original[0], E.original[1]]; view = [0, E.duration]; setPreset("original"); regs = {}; drawSlots(); schedulePreview(); cues = null; dirty = false; drawCues(); refreshSel(); };
+
+  // --- composición ---
+  const saved = (() => { try { return JSON.parse(localStorage.getItem("sc-comp-" + id) || "null"); } catch (e) { return null; } })();
+  let preset = "original", regs = {}, activeSlot = null, frameT = null;
+  const presetSel = el("select", {}, ...Object.keys(COMP_NAMES).map((k) => el("option", { value: k }, COMP_NAMES[k])));
+  const help = el("div", { class: "small mut" }), slotBox = el("div", {}), frameBox = el("div", { class: "regbox" }), prevBox = el("div", {}), compMsg = el("div", { class: "small" });
+  const frameImg = el("img", { alt: "fotograma", draggable: "false" });
+  const rects = el("div", { class: "rects" });
+  frameBox.append(frameImg, rects);
+  function setPreset(p) { preset = p; presetSel.value = p; help.textContent = COMP_HELP[p]; const slots = COMP_SLOTS[p]; activeSlot = slots.length ? slots[0][0] : null; drawSlots(); drawFrameRects(); }
+  presetSel.addEventListener("change", () => { setPreset(presetSel.value); schedulePreview(); });
+  function drawSlots() {
+    slotBox.replaceChildren(...COMP_SLOTS[preset].map(([k, label], i) => el("div", { class: "row", style: "align-items:center;margin:2px 0" },
+      el("label", { class: "fix", style: "display:flex;gap:6px;align-items:center;margin:0" }, el("input", { type: "radio", name: "slot", style: "width:auto", checked: activeSlot === k, onchange: () => { activeSlot = k; } }),
+        el("span", { style: "display:inline-block;width:12px;height:12px;border-radius:3px;background:" + SLOT_COLORS[i % 6] }), label + (regs[k] ? " ✓" : " (arrastrá sobre el fotograma)")),
+      regs[k] ? el("button", { class: "fix", onclick: () => { delete regs[k]; drawSlots(); drawFrameRects(); schedulePreview(); } }, "Quitar") : null)));
+  }
+  function drawFrameRects() {
+    rects.replaceChildren(...COMP_SLOTS[preset].filter(([k]) => regs[k]).map(([k, label]) => {
+      const r = regs[k], i = COMP_SLOTS[preset].findIndex((s) => s[0] === k), d = el("div", { class: "rect" }, label);
+      Object.assign(d.style, { left: r[0] * 100 + "%", top: r[1] * 100 + "%", width: r[2] * 100 + "%", height: r[3] * 100 + "%", borderColor: SLOT_COLORS[i % 6], color: SLOT_COLORS[i % 6] }); return d;
+    }));
+  }
+  async function loadFrame(t) {
+    frameT = t;
+    try { const r = await api(base + "/frame?t=" + t.toFixed(2)); frameImg.src = r.image; compMsg.textContent = "Fotograma en " + fmt(t) + " del video."; }
+    catch (e) { compMsg.replaceChildren(el("span", { class: "warn" }, e.message)); }
+  }
+  let rdrag = null;
+  frameBox.addEventListener("pointerdown", (ev) => {
+    if (!activeSlot || preset === "original") return;
+    const r = frameImg.getBoundingClientRect(); if (!r.width) return;
+    rdrag = { x: (ev.clientX - r.left) / r.width, y: (ev.clientY - r.top) / r.height, r }; try { frameBox.setPointerCapture(ev.pointerId); } catch (e) { /* puntero sintético */ }
+  });
+  frameBox.addEventListener("pointermove", (ev) => {
+    if (!rdrag) return;
+    const x = Math.min(1, Math.max(0, (ev.clientX - rdrag.r.left) / rdrag.r.width)), y = Math.min(1, Math.max(0, (ev.clientY - rdrag.r.top) / rdrag.r.height));
+    regs[activeSlot] = [Math.min(rdrag.x, x), Math.min(rdrag.y, y), Math.abs(x - rdrag.x), Math.abs(y - rdrag.y)].map((v) => Math.round(v * 1000) / 1000); drawFrameRects();
+  });
+  frameBox.addEventListener("pointerup", () => {
+    if (!rdrag) return; rdrag = null;
+    const r = regs[activeSlot]; if (r && (r[2] < 0.05 || r[3] < 0.05)) { delete regs[activeSlot]; compMsg.replaceChildren(el("span", { class: "warn" }, "Región demasiado pequeña (mínimo 5 % por lado).")); }
+    drawSlots(); drawFrameRects(); schedulePreview();
+  });
+  let pvTimer = null, pvSeq = 0;
+  const schedulePreview = () => { clearTimeout(pvTimer); pvTimer = setTimeout(runPreview, 450); };
+  async function runPreview() {
+    if (preset === "original" && !Object.keys(regs).length) { prevBox.replaceChildren(el("div", { class: "small mut" }, "Original: cuadro completo, sin cambios.")); return; }
+    const my = ++pvSeq; prevBox.replaceChildren(el("div", { class: "small mut" }, "Generando la previsualización…"));
+    try {
+      const r = await api(base + "/compose-preview", { composition: compOf(preset, regs), t: frameT != null ? frameT : (sel[0] + sel[1]) / 2 });
+      if (my !== pvSeq) return;
+      prevBox.replaceChildren(el("img", { src: r.image, class: "pv", alt: "previsualización 9:16" }),
+        el("div", { class: "small mut" }, r.fallback ? "⚠ " + r.fallback : (r.framing.note || "")), el("div", { class: "small mut" }, "El recuadro claro es donde irán los subtítulos."));
+    } catch (e) { if (my === pvSeq) prevBox.replaceChildren(el("div", { class: "box err" }, e.message)); }
+  }
+  setPreset("original");
+  if (saved && saved.preset && COMP_SLOTS[saved.preset]) { regs = saved.regs || {}; setPreset(saved.preset); }
+
+  // --- subtítulos ---
+  const cueBox = el("div", {}), msg = el("div");
+  function cueRow(c) {
     const t = el("textarea", { rows: 2 }); t.value = c.text;
     const a = el("input", { type: "number", step: "0.05", value: c.start }), b = el("input", { type: "number", step: "0.05", value: c.end });
     t.addEventListener("input", () => { c.text = t.value; c.edited = true; dirty = true; });
@@ -831,49 +994,82 @@ function openEditor(D, clip, version, onDone) {
     return el("div", { class: "cuerow" + (c.low_confidence ? " low" : "") }, a, b, t, el("button", { class: "fix", title: "Eliminar este subtítulo", onclick: () => { c.text = ""; c.edited = true; dirty = true; drawCues(); } }, "✕"));
   }
   function drawCues() {
-    cueBox.replaceChildren(...(cues && cues.length ? [el("div", { class: "mut small" }, "Tiempos en segundos del video original. Los subtítulos con borde de color tienen baja confianza de transcripción: revisalos. Editar el texto no retranscribe nada."),
+    cueBox.replaceChildren(...(cues && cues.length ? [el("div", { class: "mut small" }, "Tiempos en segundos del video del editor. Los subtítulos con borde de color tienen baja confianza de transcripción: revisalos. Editar el texto no retranscribe nada."),
       ...cues.filter((c) => c.text !== "" || c.edited).map(cueRow)] : [el("div", { class: "mut small" }, cues ? "No hay subtítulos en este tramo." : "Los subtítulos se generan automáticamente desde la transcripción. Cargalos para editarlos.")]));
   }
+  const axisCtx = E.axis === "context";
   async function loadCues() {
     const edits = (cues || []).filter((c) => c.edited).map((c) => ({ start: c.start, end: c.end, text: c.text }));
     try {
-      const r = await api("/api/sessions/" + encodeURIComponent(id) + "/subtitles", { clip: clip.name, start: Number(start.value), end: Number(end.value), edits });
-      cues = r.cues; loadedFor = start.value + "|" + end.value; drawCues();
+      const r = await api(base + "/subtitles", { clip: clip.name, start: sel[0], end: sel[1], edits, context: axisCtx });
+      cues = r.cues; loadedFor = sel.join("|"); drawCues();
     } catch (e) { msg.replaceChildren(el("div", { class: "box err" }, e.message)); }
   }
+
+  // --- regenerar ---
   const go = el("button", { class: "primary", onclick: async () => {
     msg.replaceChildren(); go.disabled = true;
     try {
-      if (cues && dirty && loadedFor !== start.value + "|" + end.value) await loadCues();   // conserva los textos editados al cambiar los tiempos
-      const body = { clip: clip.name, start: Number(start.value), end: Number(end.value), preset: preset.value || null };
-      if (preset.value === "gameplay") { body.fg_zoom = Number(zoom.value); body.fg_x = Number(fgx.value); if (keep.value.trim()) body.keep_regions = keep.value.split(";").map((s) => s.trim()).filter(Boolean); }
+      if (cues && dirty && loadedFor !== sel.join("|")) await loadCues();
+      const body = { clip: clip.name, start: sel[0], end: sel[1], context: axisCtx };
+      const comp = compOf(preset, regs);
+      if (preset !== "original" || Object.keys(regs).length) body.composition = comp;
       if (cues && dirty) body.cues = cues.map((c) => ({ start: c.start, end: c.end, text: c.text }));
-      const job = await api("/api/sessions/" + encodeURIComponent(id) + "/edit", body);
-      watch(job.id);
+      const job = await api(base + "/edit", body);
+      try { localStorage.setItem("sc-comp-" + id, JSON.stringify({ preset, regs })); } catch (e) { /* sin almacenamiento */ }
+      close();
+      watchEditJob(job.id, "Regenerando " + clip.name, "La versión nueva ya está seleccionada en la galería: podés reproducirla y descargarla (MP4 y SRT). Las versiones anteriores se conservan.", onDone);
     } catch (e) { msg.replaceChildren(el("div", { class: "box err" }, e.message)); go.disabled = false; }
-  } }, "Regenerar este clip");
-  function watch(jobId) {
-    const tick = async () => {
-      let j; try { j = await api("/api/jobs/" + jobId); } catch (e) { return; }
-      progress.replaceChildren(jobCard(j));
-      if (j.status === "queued" || j.status === "running") { setTimeout(tick, 1000); return; }
-      go.disabled = false;
-      if (j.status === "completed") { toast("Versión nueva creada. El original se conserva."); close(); onDone(); }
-    };
-    tick();
-  }
-  const modal = el("div", { class: "modal" }, el("div", { class: "dlg" },
-    el("h2", {}, "Editar " + clip.name), el("div", { class: "mut small" }, "Se crea una versión nueva; el clip original y las versiones anteriores no se modifican. No se retranscribe."),
-    src, sourceOk ? el("div", { class: "row", style: "margin:8px 0" }, el("button", { class: "fix", onclick: () => { start.value = src.currentTime.toFixed(2); updDur(); } }, "Marcar inicio aquí"),
-      el("button", { class: "fix", onclick: () => { end.value = src.currentTime.toFixed(2); updDur(); } }, "Marcar final aquí"), el("button", { class: "fix", onclick: preview }, "▶ Ver el tramo")) : null,
-    el("div", { class: "row" }, el("div", {}, el("label", {}, "Inicio (s)"), start), el("div", {}, el("label", {}, "Final (s)"), end), el("div", {}, dur)),
-    el("label", {}, "Presentación"), preset, focusBox,
-    el("h3", {}, "Subtítulos"), el("div", { class: "row" }, el("button", { class: "fix", onclick: loadCues }, cues ? "Actualizar según los tiempos" : "Cargar subtítulos del tramo")), cueBox,
-    msg, progress, el("div", { class: "row", style: "margin-top:14px" }, go, el("button", { class: "fix", onclick: () => close() }, "Cerrar"))));
-  function close() { clearInterval(previewTimer); modal.remove(); }
-  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
-  document.body.append(modal);
-  drawCues();
+  } }, "Regenerar como versión nueva");
+
+  const more = E.can_fetch_more ? el("div", { class: "small mut" }, "Para ver más allá de este tramo, usá «Ampliar con contexto»: recupera solo el rango necesario del VOD.") : E.needs_vod_context ? el("div", { class: "box warn" }, "Este clip solo tiene su recorte del VOD. Para ajustar sus límites hacia afuera, primero pulsá «Ampliar con contexto» (recupera únicamente el tramo necesario).") : null;
+  dlg.append(
+    el("h2", {}, "Editar " + clip.name),
+    el("div", { class: "mut small" }, "Se crea una versión nueva; el clip original y las versiones anteriores no se modifican. No se retranscribe. " + (axisCtx ? "Línea de tiempo: tramo recuperado del VOD" + (E.offset_abs != null ? " (la hora «VOD» es la del stream completo; los tiempos del clip empiezan en 0 en este tramo)." : ".") : "Línea de tiempo: video de la sesión.")),
+    more, vid, tl,
+    el("div", { class: "row small", style: "align-items:center;margin:4px 0" }, viewLbl, ctl("Ver todo", () => { view = [0, E.duration]; drawTl(); }), ctl("Acercar a la selección", () => { const p = Math.max(5, (sel[1] - sel[0]) * 0.3); view = [Math.max(0, sel[0] - p), Math.min(E.duration, sel[1] + p)]; drawTl(); }),
+      el("label", { class: "fix", style: "display:flex;gap:6px;align-items:center;margin:0" }, el("input", { type: "checkbox", style: "width:auto", checked: true, onchange: (e) => { snap = e.target.checked; } }), "Imantar a límites de frase")),
+    el("div", { class: "small mut" }, el("span", { class: "lg g1" }), "intervalo actual  ", el("span", { class: "lg g2" }), "clip original  ", el("span", { class: "lg g3" }), "propuesta de contexto  ", el("span", { class: "lg g4" }), "momento principal  ", "· líneas finas: frases"),
+    el("div", { class: "row", style: "margin:8px 0" }, el("div", {}, el("label", {}, "Inicio (s)"), inS), el("div", {}, el("label", {}, "Final (s)"), inE), el("div", { style: "flex:2" }, info)),
+    el("div", { class: "row", style: "margin:4px 0" },
+      ctl("◀ +5 s de contexto anterior", () => { setSel(0, snapTo(sel[0] - 5, 0)); }), ctl("+5 s de contexto posterior ▶", () => { setSel(1, snapTo(sel[1] + 5, 1)); }),
+      ctl("Ajustar a frases", snapSents, "Mueve el inicio y el final a los límites de las frases que los contienen"),
+      E.contextual ? ctl("Usar la propuesta de contexto", () => { sel = [E.contextual[0], E.contextual[1]]; refreshSel(); }, "Intervalo que propone «Ampliar con contexto»") : null,
+      ctl("Marcar inicio aquí", () => setSel(0, vid.currentTime)), ctl("Marcar final aquí", () => setSel(1, vid.currentTime)), ctl("▶ Ver el tramo", prevPlay)),
+    E.versions.length ? el("div", { class: "small", style: "margin:6px 0" }, "Cargar los límites de una versión: ", ...E.versions.map((v) => el("button", { class: "fix", title: v.composition ? "composición " + v.composition : "", onclick: () => { sel = [v.start, v.end]; refreshSel(); } }, v.id.replace("edit-", "") + (v.context ? " (contexto)" : "")))) : null,
+    el("h3", {}, "Composición vertical (1080×1920)"), el("div", { class: "row" }, el("div", { style: "flex:2" }, el("label", {}, "Preset"), presetSel, help)),
+    el("div", { class: "row", style: "align-items:flex-start" },
+      el("div", { style: "flex:3;min-width:300px" }, slotBox, el("div", { class: "row small", style: "margin:4px 0" }, ctl("Fotograma del instante actual", () => loadFrame(vid.currentTime || (sel[0] + sel[1]) / 2)), ctl("Fotograma del medio del clip", () => loadFrame((sel[0] + sel[1]) / 2))), compMsg, frameBox),
+      el("div", { style: "flex:2;min-width:240px" }, el("div", { class: "small" }, el("strong", {}, "Previsualización")), prevBox)),
+    el("details", {}, el("summary", {}, "Subtítulos"), el("div", { class: "row" }, el("button", { class: "fix", onclick: loadCues }, cues ? "Actualizar según los tiempos" : "Cargar subtítulos del tramo")), cueBox),
+    msg, el("div", { class: "row", style: "margin-top:14px" }, go, el("button", { class: "fix", title: "Vuelve al intervalo del clip original, composición Original y subtítulos automáticos", onclick: reset }, "Restaurar valores originales"), el("button", { class: "fix", onclick: close }, "Cerrar")));
+  refreshSel();
+  vid.addEventListener("loadedmetadata", () => { drawTl(); loadFrame((sel[0] + sel[1]) / 2); });
+  window.addEventListener("resize", drawTl);
+  if (preset !== "original") schedulePreview();
+}
+
+/* Sigue un trabajo de edición fuera del modal (panel flotante) y, al terminar, refresca la galería con la versión nueva seleccionada. */
+function watchEditJob(jobId, title, doneText, onDone) {
+  const mine = ++CTX_WATCH, hash = location.hash, panel = ctxPanel();
+  const close = () => { if (mine === CTX_WATCH) panel.remove(); };
+  const tick = async () => {
+    if (mine !== CTX_WATCH) return;
+    let j; try { j = await api("/api/jobs/" + jobId); } catch (e) { setTimeout(tick, 2000); return; }
+    const active = j.status === "queued" || j.status === "running";
+    const head = el("div", { class: "row" }, el("strong", {}, title), el("span", { class: "badge fix " + j.status }, STATUS[j.status] || j.status), el("button", { class: "fix", onclick: close }, "Ocultar"));
+    if (active) { panel.replaceChildren(head, jobCard(j)); setTimeout(tick, 1000); return; }
+    if (j.status === "completed") {
+      panel.replaceChildren(el("div", { class: "row" }, el("strong", {}, "✓ Versión nueva lista"), el("button", { class: "fix", onclick: close }, "Cerrar")), el("div", { class: "small" }, doneText));
+      toast("Versión nueva creada. El original se conserva.", 5000);
+      if (location.hash === hash) onDone();
+      setTimeout(close, 15000);
+    } else {
+      panel.replaceChildren(head, el("div", { class: "box err" }, el("strong", {}, "No se pudo generar: "), j.error || "el trabajo terminó sin resultado.", j.hint ? el("div", { class: "mut" }, "Sugerencia: " + j.hint) : null),
+        el("div", { class: "small mut" }, "No se modificó nada: el clip original y sus versiones siguen igual."));
+    }
+  };
+  tick();
 }
 
 route();

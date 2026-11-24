@@ -3,6 +3,7 @@
 No hay autenticación ni base de datos: es una herramienta personal que escucha solo en el equipo local.
 Las escrituras exigen Content-Type JSON y el Host se valida contra DNS rebinding (ver streamclipper/webutil.py).
 """
+import base64
 import json
 import logging
 import os
@@ -27,7 +28,12 @@ from streamclipper.doctor import model_cached, run_doctor
 from streamclipper.edit import (
     PRESETS, EditParams, auto_cues, export_versions, merge_edits, resolve_version_files, srt_from_ass, validate_window,
 )
+from streamclipper.editor import editor_axis, editor_data
 from streamclipper.expand import load_proposal
+from streamclipper.media.ffmpeg import probe
+from streamclipper.render.compose import composed_frame, parse_composition, settings_overrides, source_frame
+from streamclipper.render.layout import compute_layout
+from streamclipper.render.vertical import build_filter
 from streamclipper.jobs import load_result
 from streamclipper.media.download import DownloadLimits, inspect_media
 from streamclipper.models import Transcript
@@ -41,6 +47,10 @@ _STATIC = Path(__file__).parent / "static" / "index.html"
 # Versión del contrato entre la página y la API (/api/config, /api/inspect…). Súbela al cambiar el formato de lo que la página lee.
 # La página y la API salen del MISMO proceso, y la página verifica que coincidan (ver loadConfig en index.html).
 API_CONTRACT = 6
+
+
+def _data_url(jpeg: bytes) -> str:
+    return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
 
 
 def pick_file_dialog() -> str:
@@ -154,6 +164,16 @@ def make_handler(ctx: AppContext):
                 if m := re.fullmatch(r"/api/sessions/([\w.-]+)/context", path):
                     d = ctx.session(m.group(1))
                     return send_json(self, {"proposal": load_proposal(d, (query.get("clip") or [""])[0])})
+                if m := re.fullmatch(r"/api/sessions/([\w.-]+)/editor", path):
+                    d = ctx.session(m.group(1))
+                    return send_json(self, editor_data(d, (query.get("clip") or [""])[0], s))
+                if m := re.fullmatch(r"/api/sessions/([\w.-]+)/frame", path):
+                    d = ctx.session(m.group(1))
+                    src = editor_axis(d, load_result(d))["path"]
+                    if src is None:
+                        raise ApiError(404, "El video original ya no está disponible.")
+                    t = float((query.get("t") or ["0"])[0])
+                    return send_json(self, {"image": _data_url(source_frame(src, t, s.ffmpeg)), "t": t})
                 if m := re.fullmatch(r"/api/sessions/([\w.-]+)", path):
                     ctx.session(m.group(1))
                     return send_json(self, session_detail(s, m.group(1), ctx.active_sessions()))
@@ -198,6 +218,19 @@ def make_handler(ctx: AppContext):
                 ctx.session(m.group(1))
                 res = ctx.manager.delete_session(m.group(1))
                 return send_json(self, {"ok": True, **res})
+            if m := re.fullmatch(r"/api/sessions/([\w.-]+)/compose-preview", path):
+                d = ctx.session(m.group(1))
+                result = load_result(d)
+                src = editor_axis(d, result)["path"]
+                if src is None:
+                    raise ApiError(404, "El video original ya no está disponible.")
+                comp = parse_composition(body.get("composition"))
+                ov, why = settings_overrides(comp)
+                cfg = settings_from_result(result, data_dir=s.data_dir, **({"safe_platform": body["platform"]} if body.get("platform") else {}), **ov)
+                info = probe(src, s.ffprobe)
+                lay = compute_layout(info.width, info.height, cfg)
+                img = composed_frame(src, float(body.get("t", 0)), lay, cfg, s.ffmpeg, build_filter(cfg, None, lay))
+                return send_json(self, {"image": _data_url(img), "framing": lay.framing, "fallback": why or None})
             if m := re.fullmatch(r"/api/sessions/([\w.-]+)/context", path):
                 ctx.session(m.group(1))
                 return send_json(self, ctx.manager.submit_context(m.group(1), str(body.get("clip", "")), str(body.get("preset") or DEFAULT_PRESET)).to_dict(), 201)

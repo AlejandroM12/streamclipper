@@ -374,3 +374,41 @@ def test_ui_gallery_shows_final_duration_and_clip_without_context_for_old_clips(
     text = drive(f"http://127.0.0.1:{port}/#/sesion/20261121-100000-small-ctx", [{"wait": "document.body.innerText.includes('Duración final')"}],
                  "document.querySelector('#view').innerText")
     assert "Duración final 10 s" in text and "recorte ajustado a la reacción (sin contexto automático)" in text    # un clip de 10 s se explica, no se esconde
+
+
+@needs_ui
+def test_ui_clip_editor_draws_regions_previews_and_regenerates_as_a_new_version(running):
+    from tests.test_editor import make_session
+    port, ctx, cfg = running
+    make_session(cfg, "20261124-100000-small-auto-clip-ui", context=True)
+    ctx.manager.runners["edit"] = lambda j, c: threading.Event().wait(2)
+    draw = ("(() => { const i = document.querySelector('.regbox img').getBoundingClientRect(); const f = %s;"
+            " const ev = (t, x, y) => document.querySelector('.regbox').dispatchEvent(new PointerEvent(t, { clientX: i.left + x * i.width, clientY: i.top + y * i.height, bubbles: true }));"
+            " ev('pointerdown', f[0], f[1]); ev('pointermove', f[0] + f[2], f[1] + f[3]); ev('pointerup', f[0] + f[2], f[1] + f[3]); })()")
+    pick = "document.querySelectorAll('.dlg input[name=slot]')[%d].click()"
+    out = drive(f"http://127.0.0.1:{port}/#/sesion/20261124-100000-small-auto-clip-ui", [
+        {"wait": "document.body.innerText.includes('Editar clip')"},
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Editar clip').click()",
+         "wait": "document.querySelector('.dlg .tl') && document.querySelector('.regbox img') && document.querySelector('.regbox img').naturalWidth > 0"},
+        {"js": "(() => { const s = [...document.querySelectorAll('.dlg select')].find((x) => [...x.options].some((o) => o.value === 'reacciones')); s.value = 'reacciones'; s.dispatchEvent(new Event('change')); })()"},
+        {"js": pick % 0}, {"js": draw % "[0, 0, 0.3, 0.3]"}, {"js": pick % 3}, {"js": draw % "[0.1, 0.3, 0.8, 0.7]"},
+        {"wait": "document.querySelector('.dlg img.pv')"},
+        {"js": "[...document.querySelectorAll('.dlg button')].find((b) => b.textContent.trim().startsWith('+5 s de contexto posterior')).click()"},
+    ], "JSON.stringify({rects: document.querySelectorAll('.dlg .rect').length, pv: document.querySelector('.dlg img.pv').naturalWidth, "
+       "range: [...document.querySelectorAll('.dlg input[type=number]')].slice(0, 2).map((i) => Number(i.value)), "
+       "info: [...document.querySelectorAll('.dlg strong')].find((e) => e.textContent.startsWith('Duración')).parentElement.innerText})")
+    st = json.loads(out)
+    assert st["rects"] == 2 and st["pv"] == 360 and "null" not in st["info"] and "VOD 00:16:" in st["info"]       # hora absoluta del VOD (960 s + t)
+    assert st["range"][1] > 49.0                                                                              # +5 s de contexto posterior (imantado a frase)
+    drive(f"http://127.0.0.1:{port}/#/sesion/20261124-100000-small-auto-clip-ui", [
+        {"wait": "document.body.innerText.includes('Editar clip')"},
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Editar clip').click()",
+         "wait": "document.querySelector('.dlg .tl')"},
+        {"js": "(() => { const s = [...document.querySelectorAll('.dlg select')].find((x) => [...x.options].some((o) => o.value === 'gameplay')); s.value = 'gameplay'; s.dispatchEvent(new Event('change')); })()"},
+        {"wait": "document.querySelector('.regbox img') && document.querySelector('.regbox img').naturalWidth > 0"},
+        {"js": pick % 0}, {"js": draw % "[0.2, 0.2, 0.6, 0.6]"},
+        {"js": "[...document.querySelectorAll('.dlg button')].find((b) => b.textContent.trim() === 'Regenerar como versión nueva').click()",
+         "wait": "!document.querySelector('.dlg') && document.querySelector('#ctxprogress')"},
+    ], "true")
+    edit = next(j for j in json.loads(get(port, "/api/jobs"))["jobs"] if j["kind"] == "edit")
+    assert edit["params"]["context"] is True and edit["params"]["composition"]["preset"] == "gameplay" and edit["params"]["composition"]["main"] == [0.2, 0.2, 0.6, 0.6]

@@ -22,6 +22,7 @@ from streamclipper.media.ffmpeg import probe
 from streamclipper.media.validate import validate_clip
 from streamclipper.models import Transcript
 from streamclipper.pipeline import settings_from_result
+from streamclipper.render.compose import parse_composition, settings_overrides
 from streamclipper.render.layout import compute_layout
 from streamclipper.render.subtitles import (
     Cue, ass_document, build_cues, cue_metrics, layout_lines, srt_document,
@@ -31,6 +32,7 @@ from streamclipper.selection.refine import _fades
 
 EDIT_MIN_S, EDIT_MAX_S = 3.0, 90.0
 PRESETS = {  # nombre visible -> ajustes de Settings
+    "original": {"layout": "blur-fit"},
     "seguro": {"layout": "blur-fit"},
     "gameplay": {"layout": "focus"},
     "pantalla": {"layout": "fill"},
@@ -52,6 +54,7 @@ class EditParams:
     fades: bool = True
     context: bool = False                # el intervalo está en el eje de `<sesión>/context/source.mp4` (ver expand.py)
     note: dict | None = None             # motivo de la construcción contextual (lo pone el servidor, nunca el cliente)
+    composition: dict | None = None      # composición por regiones (render/compose.py); None = la presentación de siempre
 
     @classmethod
     def from_dict(cls, d: dict) -> "EditParams":
@@ -61,7 +64,8 @@ class EditParams:
                     fg_zoom=None if d.get("fg_zoom") in (None, "") else float(d["fg_zoom"]),
                     keep_regions=[str(r) for r in d["keep_regions"]] if d.get("keep_regions") else None,
                     platform=d.get("platform") or None, cues=d.get("cues"), fades=bool(d.get("fades", True)),
-                    context=bool(d.get("context", False)), note=d.get("note") if isinstance(d.get("note"), dict) else None)
+                    context=bool(d.get("context", False)), note=d.get("note") if isinstance(d.get("note"), dict) else None,
+                    composition=parse_composition(d.get("composition")))
         except (KeyError, TypeError, ValueError):
             raise InvalidInputError("Parámetros de edición inválidos: se necesitan inicio y final numéricos.") from None
         if p.preset and p.preset not in PRESETS:
@@ -209,6 +213,9 @@ def render_edit(job_dir: Path, clip: str, params: EditParams, settings: Settings
         overrides["keep_regions"] = params.keep_regions
     if params.platform:
         overrides["safe_platform"] = params.platform
+    params.composition = parse_composition(params.composition)
+    comp_overrides, comp_note = settings_overrides(params.composition)
+    overrides.update(comp_overrides)
     cfg = settings_from_result(result, data_dir=settings.data_dir, **overrides)
     cfg.validate()
 
@@ -249,6 +256,8 @@ def render_edit(job_dir: Path, clip: str, params: EditParams, settings: Settings
             raise MediaError(f"El clip editado no pasó la validación: {v['problems']}")
         b = check_boundaries(ctx.transcript, params.start, params.end)
         warnings = cue_warnings + [f"Límite de frase: {m}" for m in b["errors"] + b["warnings"]]
+        if comp_note:
+            warnings.append(f"Composición: {comp_note}.")
         if not 8 <= params.end - params.start <= 90:
             warnings.append(f"La duración ({params.end - params.start:.1f} s) está fuera del rango habitual de 8–90 s para Shorts, Reels y TikTok.")
         meta = {
@@ -262,7 +271,8 @@ def render_edit(job_dir: Path, clip: str, params: EditParams, settings: Settings
             "warnings": warnings, "validation": v, "context": params.context, "context_note": params.note,
             "params": {"start": params.start, "end": params.end, "preset": params.preset, "fg_x": params.fg_x,
                        "fg_zoom": params.fg_zoom, "keep_regions": params.keep_regions, "platform": params.platform,
-                       "fades": params.fades, "cues": params.cues},
+                       "fades": params.fades, "cues": params.cues, "composition": params.composition},
+            "composition": params.composition,
         }
         (vdir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         progress("verificar", 1.0, "")
