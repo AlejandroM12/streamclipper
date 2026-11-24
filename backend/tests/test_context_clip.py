@@ -290,3 +290,9 @@ def test_real_pipeline_builds_contextual_clips_and_regeneration_keeps_the_origin
     assert (ver / "clip.mp4").is_file() and meta["context_note"]["confidence"] and meta["duration"] == pytest.approx(prop["end"] - prop["start"], abs=0.05)
     cues = srt_times(ver / "clip.srt")
     assert cues and cues[-1][1] <= meta["duration"] + 0.2
+
+
+def test_missing_source_gets_a_specific_hint_not_the_youtube_one():
+    from streamclipper.app.manager import friendly_error
+    msg, hint = friendly_error("El video de origen de esta sesión ya no está disponible, así que no se puede buscar más contexto.")
+    assert "ubicación original" in hint and "YouTube" not in hint

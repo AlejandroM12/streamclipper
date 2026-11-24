@@ -66,9 +66,14 @@ Orientan los límites; **no fuerzan** una duración. Los clips nuevos de la app 
 
 ## Ampliar con contexto (clips existentes)
 
-En la galería de cada clip: **Ampliar con contexto** → elegir duración → *Buscar contexto* (trabajo en segundo plano) → se muestra
-«Original 10 s → propuesto 31 s», el motivo del inicio y del final, la confianza y un botón para **ver la propuesta** → *Confirmar y
-regenerar*.
+En la galería de cada clip: **Ampliar con contexto**.
+
+1. Se abre el modal y la propuesta se calcula sola, con TikTok / Reels preseleccionado (si cambiás la duración, se recalcula).
+2. Ves «Original 10 s → propuesto 31 s», el motivo del inicio y del final, la confianza y **Ver la propuesta** para previsualizarla.
+3. **Generar nuevo clip**: cuando el trabajo se acepta el modal se cierra y un panel de progreso (abajo a la derecha) muestra las etapas.
+4. Al terminar, la versión «Con contexto NNN» queda seleccionada en la galería, lista para reproducir y descargar (MP4 y SRT).
+
+Si algo falla (por ejemplo, la fuente ya no existe) el modal lo explica, con una sugerencia y «Reintentar», y no cambia nada.
 
 * Recupera el intervalo original y el origen. Sesiones de archivo/URL usan su video; los clips de «Transmisión completa» descargan
   solo el rango necesario del VOD (`<sesión>/context/`).

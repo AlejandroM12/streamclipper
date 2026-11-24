@@ -324,32 +324,47 @@ def test_ui_offers_the_three_duration_presets_with_tiktok_by_default_and_sends_t
 
 
 @needs_ui
-def test_ui_expand_with_context_previews_the_proposal_and_regenerates_keeping_the_original(running):
+def test_ui_expand_with_context_flows_from_click_to_new_clip_without_extra_steps(running):
     port, ctx, cfg = running
     _ctx_session(cfg, "20261121-100000-small-ctx")
     ctx.manager.runners["context"] = lambda j, c: None                             # la propuesta ya está preparada en disco
-    ctx.manager.runners["edit"] = lambda j, c: None
+    ctx.manager.runners["edit"] = lambda j, c: threading.Event().wait(2)           # el trabajo queda en curso un momento
     out = drive(f"http://127.0.0.1:{port}/#/sesion/20261121-100000-small-ctx", [
         {"wait": "document.body.innerText.includes('Ampliar con contexto')"},
         {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Ampliar con contexto').click()",
-         "wait": "document.body.innerText.includes('Buscar contexto')"},
-        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Buscar contexto').click()",
-         "wait": "document.body.innerText.includes('Confirmar y regenerar')"},
+         "wait": "[...document.querySelectorAll('.dlg button')].some((b) => b.textContent.trim() === 'Generar nuevo clip')"},     # sin pulsar nada más
     ], "document.querySelector('.dlg').innerText")
     assert "Original: 10 s" in out and "propuesto: 37.9 s" in out and "pausa natural" in out and "confianza alta" in out
-    assert "se conservan" in out and "Ver la propuesta" in out                      # previsualizar + el original no se toca
-    drive(f"http://127.0.0.1:{port}/#/sesion/20261121-100000-small-ctx", [
+    assert "TikTok / Reels" in out and "se conservan" in out and "Ver la propuesta" in out and "Paso 3" in out
+    state = drive(f"http://127.0.0.1:{port}/#/sesion/20261121-100000-small-ctx", [
         {"wait": "document.body.innerText.includes('Ampliar con contexto')"},
-        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Ampliar con contexto').click()"},
-        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Buscar contexto').click()",
-         "wait": "document.body.innerText.includes('Confirmar y regenerar')"},
-        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Confirmar y regenerar').click()"},
-        {"wait": "true"},
-    ], "true")
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Ampliar con contexto').click()",
+         "wait": "[...document.querySelectorAll('.dlg button')].some((b) => b.textContent.trim() === 'Generar nuevo clip')"},
+        {"js": "[...document.querySelectorAll('.dlg button')].find((b) => b.textContent.trim() === 'Generar nuevo clip').click()",
+         "wait": "!document.querySelector('.dlg') && document.querySelector('#ctxprogress')"},                                  # el modal se cierra y hay progreso
+    ], "JSON.stringify({modal: !!document.querySelector('.dlg'), panel: document.querySelector('#ctxprogress').innerText})")
+    st = json.loads(state)
+    assert st["modal"] is False and "Generando clip_01 con contexto" in st["panel"]
     jobs = json.loads(get(port, "/api/jobs"))["jobs"]
     edit = next(j for j in jobs if j["kind"] == "edit")
     assert edit["params"]["from_context"] is True and edit["params"]["note"]["confidence"] == "alta"             # el motivo lo pone el servidor
     assert edit["params"]["start"] == 3.6 and edit["params"]["end"] == 41.5
+
+
+@needs_ui
+def test_ui_expand_with_context_explains_an_unavailable_source_and_changes_nothing(running):
+    port, ctx, cfg = running
+    _ctx_session(cfg, "20261121-100000-small-ctx")
+    (cfg.jobs_dir / "20261121-100000-small-ctx" / "context" / "proposal-clip_01.json").unlink()                  # sin propuesta previa
+    from streamclipper.app.runners import run_context
+    ctx.manager.runners["context"] = run_context(cfg)                                                           # runner real: la fuente no existe
+    out = drive(f"http://127.0.0.1:{port}/#/sesion/20261121-100000-small-ctx", [
+        {"wait": "document.body.innerText.includes('Ampliar con contexto')"},
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Ampliar con contexto').click()",
+         "wait": "document.querySelector('.dlg .err')"},
+    ], "document.querySelector('.dlg').innerText")
+    assert "ya no está disponible" in out and "No se modificó nada" in out and "Reintentar" in out and "YouTube" not in out
+    assert not any(j["kind"] == "edit" for j in json.loads(get(port, "/api/jobs"))["jobs"])
 
 
 @needs_ui

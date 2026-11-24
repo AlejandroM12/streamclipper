@@ -45,6 +45,7 @@ def friendly_error(text: str) -> tuple[str, str | None]:
         (r"ffmpeg|ffprobe", "Revisá que FFmpeg funcione (`streamclipper doctor`) y probá con otro video."),
         (r"memoria|memoryerror|out of memory|alloc", "Cerrá otros programas (navegador, IDE) o usá el modelo «base», que consume menos."),
         (r"huggingface|hf_hub|model.*(download|not found)|snapshot", "No se pudo obtener el modelo Whisper: revisá tu conexión (la primera vez descarga unos 480 MB para «small»)."),
+        (r"video de origen de esta sesión ya no está disponible", "Volvé a poner el archivo en su ubicación original o procesalo de nuevo desde «Nuevo»; los clips existentes siguen intactos."),
         (r"privado|no está disponible|edad|miembros|región|drm|anti-bot|directo|lista de reproducción|dominio", "Probá con otro video público de YouTube."),
         (r"conectar|conexi[oó]n|timed out|getaddrinfo", "Revisá tu conexión a internet y reintentá."),
         (r"no existe el archivo|extensión no soportada|no es un video válido", "Elegí un archivo de video válido (MP4, MKV, MOV o WEBM)."),
