@@ -190,6 +190,11 @@ def make_handler(ctx: AppContext):
                 raise ApiError(404, "no encontrado")
             # POST
             body = read_json_body(self)
+            if path == "/api/bulk":
+                for it in body.get("items") or []:
+                    ctx.session(str((it or {}).get("session", "")))                 # cada sesión debe existir
+                job = ctx.manager.submit_bulk(str(body.get("mode", "")), body.get("items") or [], body.get("options") or {})
+                return send_json(self, job.to_dict(), 201)
             if path == "/api/jobs" and body.get("auto") is not None:
                 job = ctx.manager.submit_auto(body.get("source", ""), body["auto"] or {}, body.get("params") or {}, bool(body.get("force")))
                 return send_json(self, job.to_dict(), 201)

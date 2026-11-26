@@ -23,6 +23,7 @@ STAGE_LABELS = {
     "seleccion_global": "Elegir los mejores momentos de toda la transmisión",
     "render_final": "Generar los clips elegidos",
     "proponer": "Proponer el intervalo con contexto",
+    "bulk": "Procesar los clips seleccionados",
 }
 PROCESS_STAGES = ["validar", "extraer_audio", "transcribir", "analizar_audio", "seleccionar", "renderizar", "verificar"]
 EDIT_STAGES = ["preparar", "renderizar", "verificar"]
@@ -30,6 +31,7 @@ SEGMENT_STAGES = ["descarga"] + PROCESS_STAGES
 AUTO_BLOCK_STAGES = ["descarga", "validar", "extraer_audio", "transcribir", "analizar_audio", "seleccionar"]   # un bloque no renderiza
 AUTO_JOB_STAGES = ["seleccion_global", "render_final"]
 CONTEXT_STAGES = ["preparar", "proponer"]
+BULK_STAGES = ["bulk"]
 
 
 def segment_stage_keys(job) -> list[str]:

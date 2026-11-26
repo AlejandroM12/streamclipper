@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -412,3 +413,33 @@ def test_ui_clip_editor_draws_regions_previews_and_regenerates_as_a_new_version(
     ], "true")
     edit = next(j for j in json.loads(get(port, "/api/jobs"))["jobs"] if j["kind"] == "edit")
     assert edit["params"]["context"] is True and edit["params"]["composition"]["preset"] == "gameplay" and edit["params"]["composition"]["main"] == [0.2, 0.2, 0.6, 0.6]
+
+
+@needs_ui
+def test_ui_bulk_regeneration_selects_previews_proposals_then_renders_with_progress(running):
+    from tests.test_editor import make_session
+    port, ctx, cfg = running
+    for s in ("a", "b"):
+        make_session(cfg, f"20261124-100000-small-bulk-{s}", context=False)
+
+    def fake(job, ctl):                                         # sin procesar de verdad: solo el contrato del trabajo masivo
+        mode = job.params["mode"]
+        for it in job.result["items"]:
+            if mode == "propose":
+                it["proposal"] = {"start": 1, "end": 30, "duration": 29, "original": 5, "confidence": "alta", "plain": False, "estimated": False}
+            else:
+                it["version"], it["duration"] = "edit-v001", 29
+            it["status"] = "done"
+            ctl.set(result=job.result)
+            time.sleep(0.4)
+    ctx.manager.runners["bulk"] = fake
+    out = drive(f"http://127.0.0.1:{port}/#/", [{"wait": "true"}, {"js": "location.hash = '#/sesion/20261124-100000-small-bulk-a'", "wait": "document.querySelectorAll('.bchk').length === 1"},
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Seleccionar todos').click()"},
+        {"js": "[...document.querySelectorAll('button')].find((b) => b.textContent.trim().startsWith('Regenerar seleccionados')).click()", "wait": "document.querySelector('.dlg')"},
+        {"js": "[...document.querySelectorAll('.dlg button')].find((b) => b.textContent.trim() === 'Ver propuestas').click()",
+         "wait": "[...document.querySelectorAll('.dlg button')].some((b) => b.textContent.startsWith('Regenerar '))"},
+    ], "document.querySelector('.dlg').innerText")
+    assert "5 s → 29 s" in out and "confianza alta" in out and "no se tocan" in out
+    jobs = json.loads(get(port, "/api/jobs"))["jobs"]
+    prop = next(j for j in jobs if j["kind"] == "bulk")
+    assert prop["params"]["mode"] == "propose" and prop["params"]["options"]["preset"] == "tiktok" and prop["params"]["options"]["extend"] is True

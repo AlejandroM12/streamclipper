@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from streamclipper.app.state import (
-    ACTIVE, AUTO_JOB_STAGES, CONTEXT_STAGES, EDIT_STAGES, PROCESS_STAGES, SEGMENT_STAGES, AppJob, JobStore, Segment, make_stages, segment_stage_keys,
+    ACTIVE, AUTO_JOB_STAGES, BULK_STAGES, CONTEXT_STAGES, EDIT_STAGES, PROCESS_STAGES, SEGMENT_STAGES, AppJob, JobStore, Segment, make_stages, segment_stage_keys,
 )
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
@@ -285,6 +285,52 @@ class JobManager:
                      stages=make_stages(CONTEXT_STAGES))
         return self._enqueue(job)
 
+    def submit_bulk(self, mode: str, items: list[dict], options: dict) -> AppJob:
+        """Regeneración masiva: «propose» busca el contexto de cada clip y deja propuestas; «render» regenera cada clip como versión
+        nueva. Siempre secuencial (un clip a la vez) para no saturar CPU, RAM ni disco. El estado de cada clip se guarda en el trabajo."""
+        from streamclipper.render.compose import parse_composition
+        if mode not in ("propose", "render"):
+            raise ApiError(400, "Modo desconocido (propose o render).")
+        if not items or len(items) > 40:
+            raise ApiError(400, "Elegí entre 1 y 40 clips.")
+        clean = []
+        for it in items:
+            s, c = str((it or {}).get("session", "")), str((it or {}).get("clip", ""))
+            if not re.fullmatch(r"[\w.-]{1,120}", s) or not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", c) or (s, c) in [(x["session"], x["clip"]) for x in clean]:
+                raise ApiError(400, "Lista de clips inválida.")
+            clean.append({"session": s, "clip": c, "status": "pending", "message": "", "error": None})
+        opts = {"extend": bool(options.get("extend", True)), "preset": str(options.get("preset") or "tiktok")}
+        if opts["preset"] not in CLIP_PRESETS:
+            raise ApiError(400, "Duración de clips desconocida (cortos, tiktok o extendido).")
+        try:
+            opts["composition"] = parse_composition(options.get("composition"))
+        except InvalidInputError as e:
+            raise ApiError(400, str(e)) from None
+        self._check_capacity()
+        job = AppJob(id=AppJob.new_id(), kind="bulk", title=("Buscar contexto de " if mode == "propose" else "Regenerar ") + f"{len(clean)} clip(s)",
+                     input="", input_kind="bulk", params={"mode": mode, "options": opts}, stages=make_stages(BULK_STAGES),
+                     dup_key=f"bulk|{mode}|{time.time()}", result={"items": clean})
+        return self._enqueue(job)
+
+    def _retry_bulk(self, job_id: str) -> AppJob:
+        """Continúa un trabajo masivo: los clips terminados se conservan; se repiten los pendientes, fallidos o cancelados."""
+        with self._lock:
+            job = self._jobs[job_id]
+            todo = [i for i in job.result["items"] if i["status"] != "done"]
+            if not todo:
+                raise ApiError(409, "Todos los clips de este trabajo ya están listos.")
+            self._check_capacity()
+            for i in todo:
+                i.update(status="pending", message="", error=None)
+            for st in job.stages:
+                st.update(status="pending", fraction=None, detail="", seconds=None, started=None)
+            job.status, job.error, job.hint, job.error_detail, job.finished_at = "queued", None, None, None, None
+            job.message = f"Continuando: {len(todo)} clip(s) pendiente(s)"
+            self._tokens[job_id] = CancelToken()
+        self._save(job, force=True)
+        self._q.put(job_id)
+        return job
+
     def submit_edit(self, session: str, clip: str, params: dict) -> AppJob:
         dup_key = f"edit|{session}|{clip}"
         self._check_duplicate(dup_key, force=True)   # solo se rechaza si hay otra edición del mismo clip en curso
@@ -390,6 +436,8 @@ class JobManager:
                 raise ApiError(409, "Solo se pueden reintentar trabajos fallidos, cancelados o interrumpidos.")
         if old.kind == "vod":
             return self._retry_vod(job_id)
+        if old.kind == "bulk":
+            return self._retry_bulk(job_id)
         if old.kind == "edit":
             return self.submit_edit(old.params["session"], old.params["clip"], {k: v for k, v in old.params.items()
                                                                                  if k not in ("session", "clip")})

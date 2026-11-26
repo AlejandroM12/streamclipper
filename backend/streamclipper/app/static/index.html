@@ -52,7 +52,8 @@ details{margin:6px 0}summary{cursor:pointer;color:var(--acc)}.tx{white-space:pre
 .tl .h{width:14px;margin-left:-7px;background:#30a46c;opacity:.9;pointer-events:auto;cursor:ew-resize;border-radius:4px}
 .tl .o-head{width:2px;background:var(--fg);opacity:.8}
 .tl .ticks{position:absolute;left:0;right:0;bottom:0;height:12px;pointer-events:none}.tl .ticks i{position:absolute;top:0;bottom:0;background:rgba(62,99,221,.5);border-right:1px solid var(--card)}
-.lg{display:inline-block;width:12px;height:10px;border-radius:2px;margin:0 4px 0 6px;vertical-align:middle}.lg.g1{background:#30a46c}.lg.g2{background:#999}.lg.g3{border:2px solid #3e63dd}.lg.g4{background:#e5484d}
+.tl .ticks i.trn{top:-84px;bottom:0;width:2px!important;background:#ab4aba;border:0;opacity:.9}
+.lg{display:inline-block;width:12px;height:10px;border-radius:2px;margin:0 4px 0 6px;vertical-align:middle}.lg.g1{background:#30a46c}.lg.g2{background:#999}.lg.g3{border:2px solid #3e63dd}.lg.g4{background:#e5484d}.lg.g5{background:#ab4aba}
 .regbox{position:relative;display:inline-block;max-width:100%;margin-top:6px;cursor:crosshair;touch-action:none;user-select:none}.regbox img{display:block;max-width:100%;border-radius:6px}
 .regbox .rects{position:absolute;inset:0;pointer-events:none}.regbox .rect{position:absolute;border:2px solid;font-size:11px;font-weight:700;background:rgba(0,0,0,.12)}
 img.pv{width:100%;max-width:300px;border-radius:8px;border:1px solid var(--line);display:block;margin:4px 0}
@@ -585,7 +586,7 @@ async function buildSession(id, refresh, opts = {}) {
       el("button", { class: "fix", title: "Procesa el mismo video con el otro detector reutilizando la transcripción", disabled: !D.has_source, onclick: async () => {
         try { await api("/api/sessions/" + encodeURIComponent(id) + "/try-smart", {}); toast("Trabajo agregado. Seguilo en «Nuevo» → Trabajos."); } catch (e) { toast(e.message, 6000); }
       } }, "Probar con " + (sess.detector === "smart" ? "la detección clásica" : "Smart Highlights")),
-      el("span", { class: "mut small" }, "Marcá «Exportar» en cada clip. Se copian a la carpeta de exportación sin tocar los originales.")), out);
+      el("span", { class: "mut small" }, "Marcá «Exportar» en cada clip. Se copian a la carpeta de exportación sin tocar los originales.")), bulkBar(refresh), out);
   async function doExport() {
     const selections = [...sel].map((k) => { const [clip, version] = k.split("|"); return { clip, version }; });
     if (!selections.length) { toast("Marcá al menos un clip para exportar."); return; }
@@ -624,7 +625,8 @@ async function buildSession(id, refresh, opts = {}) {
             el("button", { class: "fix", onclick: () => openEditor(D, c, v, refresh) }, "Editar clip"),
             el("button", { class: "fix", title: "Busca el contexto anterior y posterior y propone un clip que se entienda solo; el original se conserva", onclick: () => openContext(D, c, v, refresh) }, "Ampliar con contexto"),
             el("a", { href: dl("mp4"), class: "fix" }, el("button", { type: "button" }, "Descargar MP4")), el("a", { href: dl("srt"), class: "fix" }, el("button", { type: "button" }, "Descargar SRT")),
-            el("label", { class: "fix", style: "display:flex;gap:6px;align-items:center;margin:0" }, el("input", { type: "checkbox", style: "width:auto", checked: sel.has(key), onchange: (ev) => { if (ev.target.checked) sel.add(key); else sel.delete(key); } }), "Exportar")),
+            el("label", { class: "fix", style: "display:flex;gap:6px;align-items:center;margin:0" }, el("input", { type: "checkbox", style: "width:auto", checked: sel.has(key), onchange: (ev) => { if (ev.target.checked) sel.add(key); else sel.delete(key); } }), "Exportar"),
+            el("label", { class: "fix", title: "Para regenerar varios clips a la vez", style: "display:flex;gap:6px;align-items:center;margin:0" }, el("input", { type: "checkbox", class: "bchk", style: "width:auto", "data-sid": id, "data-clip": c.name }), "Seleccionar")),
           (v.issues || []).length ? el("details", { open: true }, el("summary", {}, (v.issues.length) + " aviso(s) de esta versión"), ...v.issues.slice(0, 8).map((x) => el("div", { class: "small warn" }, "⚠ " + x))) : null,
           el("details", {}, el("summary", {}, "Transcripción y confianza"), el("div", { class: "tx" }, c.transcript || "(sin habla transcrita)"),
             el("div", { class: "mut small" }, conf.words + " palabras · prob. media " + conf.mean_word_prob + " · " + conf.words_below_0_4_pct + " % con baja confianza" + (conf.low_confidence_words.length ? " (" + conf.low_confidence_words.slice(0, 8).join(", ") + ")" : ""))),
@@ -679,7 +681,7 @@ async function viewAuto(view, id) {
     el("details", {}, el("summary", {}, "Detalle por bloque (tiempos y memoria medidos)"), el("div", { class: "small mut" }, ...A.block_stats.map((b) => el("div", {},
       "Bloque " + (b.index + 1) + " · " + (SEG_STATUS[b.status] || b.status) + (b.candidates != null ? " · " + b.candidates + " candidatos (" + b.eligible + " elegibles) · descarga " + b.download_mb + " MB en " + b.download_s + " s · análisis " + b.seconds + " s · RAM pico " + b.peak_ram_mb + " MB" : ""))))),
     el("div", { class: "row", style: "margin-top:10px" }, el("div", {}, sortSel), el("div", {}, filtSel),
-      el("button", { class: "primary fix", onclick: doExport }, "Exportar los clips marcados (MP4 + SRT)")), out);
+      el("button", { class: "primary fix", onclick: doExport }, "Exportar los clips marcados (MP4 + SRT)")), bulkBar(refresh), out);
   function draw() {
     const rows = cards.filter((c) => filt === "all" || c.meta.kind === filt).sort((a, b) => sort === "score" ? b.meta.score - a.meta.score : a.meta.start - b.meta.start);
     listEl.replaceChildren(...(rows.length ? rows.map((c) => c.el) : [el("div", { class: "card mut" }, A.clips.length ? "Ningún clip coincide con el filtro." : "Todavía no hay clips generados.")]));
@@ -816,6 +818,132 @@ function openContext(D, clip, version, onDone) {
 }
 
 /* ---------- editor ---------- */
+/* ---------- regeneración masiva (1.5) ---------- */
+const ITEM_ICON = { pending: "○", running: "◔", done: "✓", failed: "✕", cancelled: "—" };
+function bulkBar(refresh) {
+  const count = el("span", { class: "mut small" }), btn = el("button", { class: "primary fix", disabled: true, onclick: () => {
+    const items = [...document.querySelectorAll(".bchk:checked")].map((c) => ({ session: c.dataset.sid, clip: c.dataset.clip }));
+    openBulk(items, refresh);
+  } }, "Regenerar seleccionados…");
+  const upd = () => { const n = document.querySelectorAll(".bchk:checked").length; count.textContent = n ? n + " clip(s) seleccionado(s)" : "Ningún clip seleccionado"; btn.disabled = !n; };
+  (window.__bulkBars = window.__bulkBars || []).push({ count, upd });          // las barras descartadas (tarjetas compactas) se podan al usarse
+  if (!window.__bulkWired) {
+    window.__bulkWired = true;
+    document.addEventListener("change", (e) => {
+      if (!(e.target.classList && e.target.classList.contains("bchk"))) return;
+      window.__bulkBars = window.__bulkBars.filter((b) => b.count.isConnected);
+      window.__bulkBars.forEach((b) => b.upd());
+    });
+  }
+  const all = el("button", { class: "fix", onclick: () => {
+    const boxes = [...document.querySelectorAll(".bchk")], on = boxes.some((b) => !b.checked);
+    boxes.forEach((b) => { b.checked = on; }); upd(); all.textContent = on ? "Quitar la selección" : "Seleccionar todos";
+  } }, "Seleccionar todos");
+  upd();
+  return el("div", { class: "row small", style: "margin-top:8px;align-items:center" }, el("strong", { class: "fix" }, "Varios clips:"), all, btn, count);
+}
+function bulkRows(items) {
+  return items.map((it) => el("div", { class: "row small", style: "align-items:center;margin:2px 0" },
+    el("span", { class: "fix", style: "width:18px" }, ITEM_ICON[it.status] || "?"), el("span", { class: "fix", style: "min-width:200px" }, it.clip + " · " + it.session.replace(/^\d+-\d+-/, "")),
+    el("span", { class: it.status === "failed" ? "warn" : "mut" }, it.error ? it.error : it.proposal ? it.proposal.original + " s → " + it.proposal.duration + " s · " + (CONF_ES[it.proposal.confidence] || "sin contexto") + (it.proposal.estimated ? " · con estimación" : it.proposal.plain ? "" : " · límites respaldados") : it.version ? it.version.replace("edit-", "") + " · " + it.duration + " s" : STATUS_ITEM[it.status] || "")));
+}
+const STATUS_ITEM = { pending: "en espera", running: "en curso…", done: "listo", failed: "falló", cancelled: "cancelado" };
+
+function openBulk(items, onDone) {
+  if (!items.length) return;
+  const modal = el("div", { class: "modal" }), dlg = el("div", { class: "dlg" }); modal.append(dlg); document.body.append(modal);
+  const lastComp = (() => { try { return JSON.parse(localStorage.getItem("sc-comp-last") || "null"); } catch (e) { return null; } })();
+  const extend = el("input", { type: "checkbox", checked: true, style: "width:auto" });
+  const presetSel = el("select", {}, ...(CONFIG.clip_presets || []).map((cp) => el("option", { value: cp.id, selected: cp.id === "tiktok" }, cp.label)));
+  const compSel = el("select", {}, el("option", { value: "" }, "Sin cambios (la presentación actual de cada clip)"), el("option", { value: "original" }, "Original (cuadro completo)"),
+    lastComp && lastComp.preset && lastComp.preset !== "original" ? el("option", { value: "last" }, "Usar la última composición del editor: " + COMP_NAMES[lastComp.preset].split(":")[0]) : null);
+  const body = el("div", {}), actions = el("div", { class: "row", style: "margin-top:12px" });
+  let jobId = null, stopped = false, proposed = false;
+  const options = () => ({ extend: extend.checked, preset: presetSel.value, composition: compSel.value === "original" ? { preset: "original" } : compSel.value === "last" ? compOf(lastComp.preset, lastComp.regs || {}) : null });
+  const close = () => { stopped = true; modal.remove(); };
+  modal.addEventListener("click", (e) => { if (e.target === modal) close(); });
+  async function run(mode, list) {
+    const job = await api("/api/bulk", { mode, items: list, options: options() }); jobId = job.id;
+    return job.id;
+  }
+  async function follow(id, onTick) {
+    for (;;) {
+      if (stopped) return null;
+      const j = await api("/api/jobs/" + id);
+      onTick(j);
+      if (j.status !== "queued" && j.status !== "running") return j;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  const progressBar = (j) => { const f = (j.stages[0] && j.stages[0].fraction) || 0; const b = el("div", { class: "bar" }, el("i", {})); b.firstChild.style.width = Math.round(f * 100) + "%"; return b; };
+  async function propose() {
+    actions.replaceChildren(); body.replaceChildren(el("div", { class: "box" }, "Buscando el contexto de los clips (uno a la vez)…"));
+    try {
+      const id = await run("propose", items);
+      const cancelBtn = el("button", { class: "danger fix", onclick: () => api("/api/jobs/" + id + "/cancel", {}).catch((e) => toast(e.message)) }, "Cancelar");
+      actions.replaceChildren(cancelBtn);
+      const j = await follow(id, (j) => body.replaceChildren(el("div", { class: "box" }, el("div", {}, el("strong", {}, j.message || "Preparando…")), progressBar(j), ...bulkRows(j.result.items))));
+      if (j === null) return;
+      showProposals(j);
+    } catch (e) { body.replaceChildren(el("div", { class: "box err" }, e.message)); drawStart(); }
+  }
+  function showProposals(j) {
+    const rows = j.result.items, ok = rows.filter((r) => r.status === "done"), inc = new Set(ok.map((r) => r.session + "|" + r.clip));
+    proposed = true;
+    const list = rows.map((r) => {
+      const key = r.session + "|" + r.clip, chk = el("input", { type: "checkbox", style: "width:auto", checked: r.status === "done", disabled: r.status !== "done", onchange: (e) => { if (e.target.checked) inc.add(key); else inc.delete(key); upd(); } });
+      return el("label", { class: "row small", style: "align-items:center;margin:2px 0" }, el("span", { class: "fix" }, chk), ...bulkRows([r]));
+    });
+    const go = el("button", { class: "primary", onclick: render }, "Regenerar"), upd = () => { go.textContent = "Regenerar " + inc.size + " clip(s)"; go.disabled = !inc.size; };
+    body.replaceChildren(el("div", { class: "box" }, el("strong", {}, "Propuestas"), el("div", { class: "mut small" }, "Revisá y desmarcá los que no quieras. Cada clip se regenera como versión nueva; los originales y las versiones anteriores no se tocan."), ...list,
+      j.status === "failed" ? el("div", { class: "small warn" }, "Algunos clips no tienen propuesta (ver el error de cada uno). Podés reintentarlos o regenerar solo los que sí la tienen.") : null));
+    actions.replaceChildren(go, ...(j.status === "failed" ? [el("button", { class: "fix", onclick: async () => { await api("/api/jobs/" + j.id + "/retry", {}); watchRetry(j.id); } }, "Reintentar los fallidos")] : []), el("button", { class: "fix", onclick: close }, "Cancelar")); upd();
+    async function render() {
+      go.disabled = true;
+      try {
+        const id = await run("render", ok.filter((r) => inc.has(r.session + "|" + r.clip)).map((r) => ({ session: r.session, clip: r.clip })));
+        try { if (compSel.value === "last") localStorage.setItem("sc-comp-last", JSON.stringify(lastComp)); } catch (e) { /* sin almacenamiento */ }
+        close(); watchBulkJob(id, "Regenerando clips", onDone);
+      } catch (e) { body.append(el("div", { class: "box err" }, e.message)); go.disabled = false; }
+    }
+  }
+  async function watchRetry(id) { actions.replaceChildren(); const j = await follow(id, (j) => body.replaceChildren(el("div", { class: "box" }, progressBar(j), ...bulkRows(j.result.items)))); if (j) showProposals(j); }
+  function drawStart() {
+    actions.replaceChildren(el("button", { class: "primary", onclick: propose }, "Ver propuestas"), el("button", { class: "fix", onclick: close }, "Cancelar"));
+  }
+  dlg.append(el("h2", {}, "Regenerar " + items.length + " clip(s)"),
+    el("div", { class: "mut small" }, "Se procesan de a uno para no saturar el equipo, sin repetir el análisis completo del video. Primero ves las propuestas; recién después se regenera."),
+    el("div", { class: "row", style: "margin:8px 0" },
+      el("label", { class: "fix", style: "display:flex;gap:6px;align-items:center;margin:0" }, extend, "Ampliar con contexto"), el("div", {}, el("label", {}, "Duración de los clips"), presetSel),
+      el("div", {}, el("label", {}, "Composición visual"), compSel)),
+    el("div", { class: "small mut" }, "Para definir regiones (cámaras / contenido) abrí «Editar clip» en un clip y regeneralo una vez: la última composición queda disponible acá."),
+    body, actions);
+  drawStart();
+}
+function watchBulkJob(jobId, title, onDone) {
+  const mine = ++CTX_WATCH, hash = location.hash, panel = ctxPanel();
+  const close = () => { if (mine === CTX_WATCH) panel.remove(); };
+  const tick = async () => {
+    if (mine !== CTX_WATCH) return;
+    let j; try { j = await api("/api/jobs/" + jobId); } catch (e) { setTimeout(tick, 2000); return; }
+    const active = j.status === "queued" || j.status === "running", f = (j.stages[0] && j.stages[0].fraction) || 0;
+    const bar = el("div", { class: "bar" }, el("i", {})); bar.firstChild.style.width = Math.round((j.status === "completed" ? 1 : f) * 100) + "%";
+    const head = el("div", { class: "row" }, el("strong", {}, title), el("span", { class: "badge fix " + j.status }, STATUS[j.status] || j.status), el("button", { class: "fix", onclick: close }, "Ocultar"));
+    const rows = bulkRows(j.result.items);
+    if (active) {
+      panel.replaceChildren(head, el("div", { class: "small" }, j.message || ""), bar, ...rows, el("button", { class: "danger fix", onclick: () => api("/api/jobs/" + jobId + "/cancel", {}).catch((e) => toast(e.message)) }, "Cancelar"));
+      setTimeout(tick, 1000); return;
+    }
+    const failed = j.result.items.filter((i) => i.status === "failed" || i.status === "cancelled").length;
+    panel.replaceChildren(head, el("div", { class: "small" }, j.message || ""), bar, ...rows,
+      failed ? el("button", { class: "fix", onclick: async () => { try { await api("/api/jobs/" + jobId + "/retry", {}); watchBulkJob(jobId, title, onDone); } catch (e) { toast(e.message); } } }, "Reintentar los " + failed + " pendientes/fallidos") : el("div", { class: "small" }, "✓ Listo. Las versiones nuevas están seleccionadas en cada clip."),
+      el("div", { class: "small mut" }, "Los clips originales y sus versiones anteriores se conservan."));
+    if (j.result.items.some((i) => i.status === "done") && location.hash === hash) onDone();
+    if (!failed) { toast("Regeneración terminada. Los originales se conservan.", 5000); setTimeout(close, 20000); }
+  };
+  tick();
+}
+
 /* ---------- editor de clips (1.5) ---------- */
 const COMP_SLOTS = {
   original: [],
@@ -880,7 +1008,8 @@ async function openEditor(D, clip, version, onDone) {
       const t = view[0] + px / w * (view[1] - view[0]), i = Math.floor(t / hop), v = W_[i] || 0;
       const bh = Math.max(1, v * (h - 26)); g.fillRect(px, h - 14 - bh, 1, bh);
     }
-    ticks.replaceChildren(...sents.filter((s) => s[1] > view[0] && s[0] < view[1]).slice(0, 400).map((s) => { const d = el("i", { title: s[2] }); d.style.left = x2p(s[0]) + "%"; d.style.width = Math.max(0.1, x2p(s[1]) - x2p(s[0])) + "%"; return d; }));
+    ticks.replaceChildren(...sents.filter((s) => s[1] > view[0] && s[0] < view[1]).slice(0, 400).map((s) => { const d = el("i", { title: s[2] }); d.style.left = x2p(s[0]) + "%"; d.style.width = Math.max(0.1, x2p(s[1]) - x2p(s[0])) + "%"; return d; }),
+      ...((E.transitions && E.transitions.times) || []).filter((t) => t >= view[0] && t <= view[1]).map((t) => { const d = el("i", { class: "trn", title: "Cambio visual significativo: posible cambio de pregunta o de situación (" + fmt(t) + ")" }); d.style.left = x2p(t) + "%"; return d; }));
     place(oOrig, E.original[0], E.original[1]); place(oCtx, E.contextual && E.contextual[0], E.contextual && E.contextual[1]); place(oEv, E.event && E.event[0], E.event && E.event[1]); place(oSel, sel[0], sel[1]);
     hS.style.left = x2p(sel[0]) + "%"; hE.style.left = x2p(sel[1]) + "%";
     oHead.style.left = x2p(vid.currentTime || 0) + "%";
@@ -1016,7 +1145,7 @@ async function openEditor(D, clip, version, onDone) {
       if (preset !== "original" || Object.keys(regs).length) body.composition = comp;
       if (cues && dirty) body.cues = cues.map((c) => ({ start: c.start, end: c.end, text: c.text }));
       const job = await api(base + "/edit", body);
-      try { localStorage.setItem("sc-comp-" + id, JSON.stringify({ preset, regs })); } catch (e) { /* sin almacenamiento */ }
+      try { localStorage.setItem("sc-comp-" + id, JSON.stringify({ preset, regs })); localStorage.setItem("sc-comp-last", JSON.stringify({ preset, regs })); } catch (e) { /* sin almacenamiento */ }
       close();
       watchEditJob(job.id, "Regenerando " + clip.name, "La versión nueva ya está seleccionada en la galería: podés reproducirla y descargarla (MP4 y SRT). Las versiones anteriores se conservan.", onDone);
     } catch (e) { msg.replaceChildren(el("div", { class: "box err" }, e.message)); go.disabled = false; }
@@ -1029,7 +1158,7 @@ async function openEditor(D, clip, version, onDone) {
     more, vid, tl,
     el("div", { class: "row small", style: "align-items:center;margin:4px 0" }, viewLbl, ctl("Ver todo", () => { view = [0, E.duration]; drawTl(); }), ctl("Acercar a la selección", () => { const p = Math.max(5, (sel[1] - sel[0]) * 0.3); view = [Math.max(0, sel[0] - p), Math.min(E.duration, sel[1] + p)]; drawTl(); }),
       el("label", { class: "fix", style: "display:flex;gap:6px;align-items:center;margin:0" }, el("input", { type: "checkbox", style: "width:auto", checked: true, onchange: (e) => { snap = e.target.checked; } }), "Imantar a límites de frase")),
-    el("div", { class: "small mut" }, el("span", { class: "lg g1" }), "intervalo actual  ", el("span", { class: "lg g2" }), "clip original  ", el("span", { class: "lg g3" }), "propuesta de contexto  ", el("span", { class: "lg g4" }), "momento principal  ", "· líneas finas: frases"),
+    el("div", { class: "small mut" }, el("span", { class: "lg g1" }), "intervalo actual  ", el("span", { class: "lg g2" }), "clip original  ", el("span", { class: "lg g3" }), "propuesta de contexto  ", el("span", { class: "lg g4" }), "momento principal  ", el("span", { class: "lg g5" }), "cambio visual (otra situación)  ", "· franja inferior: frases"),
     el("div", { class: "row", style: "margin:8px 0" }, el("div", {}, el("label", {}, "Inicio (s)"), inS), el("div", {}, el("label", {}, "Final (s)"), inE), el("div", { style: "flex:2" }, info)),
     el("div", { class: "row", style: "margin:4px 0" },
       ctl("◀ +5 s de contexto anterior", () => { setSel(0, snapTo(sel[0] - 5, 0)); }), ctl("+5 s de contexto posterior ▶", () => { setSel(1, snapTo(sel[1] + 5, 1)); }),

@@ -39,7 +39,10 @@ EDGE = 2.0                                                          # a menos de
 CALM_DB, CALM_HOLD = 1.0, 1.5     # el audio «volvió a la calma»: bajo +1 dB sobre lo habitual durante 1,5 s
 QUIET_DB = -8.0                   # silencio relativo (misma referencia que Smart Highlights)
 EXC_MIN_WORDS_PER_S = 1.2         # una situación de más de 60 s se justifica solo si es una conversación continua
-NATURAL = ("pausa", "material")   # tipos de límite fuertes
+TR_MARGIN = 4.0                   # una transición visual limita el contexto solo si queda a más de esto del evento: más cerca suele ser parte
+                                  # de la misma situación (la pantalla cambia al reaccionar o al mostrarse el resultado) y no se la trata como límite
+NATURAL = ("pausa", "material", "transicion")   # tipos de límite fuertes (respaldados por evidencia)
+BACKED = NATURAL + ("calma",)     # límites respaldados por evidencia; el resto (tope de contexto, estimación, sin habla) son estimados
 
 
 @dataclass
@@ -184,8 +187,10 @@ def _dense(segs: list[Segment], a: float, b: float) -> float:
 
 
 def build_window(c: Candidate, segs: list[Segment], curve, dur: float, cfg, preset: str, event: tuple[float, float] | None = None,
-                 core: Refined | None = None) -> Refined:
-    """Ventana contextual de un candidato. `event` (opcional) fija el evento; si no, se halla con `refine_window` (necesita `core`)."""
+                 core: Refined | None = None, transitions: list[float] | None = None) -> Refined:
+    """Ventana contextual de un candidato. `event` (opcional) fija el evento; si no, se halla con `refine_window` (necesita `core`).
+    `transitions` (opcional): instantes de cambios visuales significativos (analysis/transitions.py). Una transición antes/después del
+    evento marca donde empieza/termina OTRA situación: el contexto no la cruza."""
     P = PRESETS[preset]
     segs = _sorted(segs)
     if event is None:
@@ -197,6 +202,19 @@ def build_window(c: Candidate, segs: list[Segment], curve, dur: float, cfg, pres
     pre_t, post_t = 0.55 * remaining, 0.45 * remaining
     s_opts, s_ref = start_options(segs, e0, e1, dur)
     e_opts, e_ref = end_options(segs, e0, e1, dur)
+    sig: dict = {"visual_transitions": [round(t, 2) for t in (transitions or [])], "barrier_start": None, "barrier_end": None}
+    end_barrier = None
+    if transitions:
+        tr_pre = max((t for t in transitions if e0 - PRE_MAX <= t <= e0 - TR_MARGIN), default=None)
+        tr_post = min((t for t in transitions if e1 + TR_MARGIN <= t <= e1 + POST_MAX), default=None)
+        keep = [o for o in s_opts if tr_pre is not None and o.t >= tr_pre - 0.3]
+        if keep and len(keep) < len(s_opts):
+            keep[-1].kind, keep[-1].reason = "transicion", f"cambio visual significativo (≈{tr_pre:.0f} s del video): lo anterior parece otra situación"
+            s_opts, sig["barrier_start"] = keep, round(tr_pre, 2)
+        keep = [o for o in e_opts if tr_post is not None and o.t <= tr_post + 0.3]
+        if keep and len(keep) < len(e_opts):
+            keep[-1].kind, keep[-1].reason = "transicion", f"cambio visual significativo (≈{tr_post:.0f} s del video): lo siguiente parece otra situación"
+            e_opts, sig["barrier_end"], end_barrier = keep, round(tr_post, 2), keep[-1]
     budget_max = max(P["max"] - L, 0.0)
     sel = _select(s_opts, s_ref, e_opts, e_ref, e0, e1, budget_max, pre_t, post_t)
     justified = False
@@ -208,6 +226,8 @@ def build_window(c: Candidate, segs: list[Segment], curve, dur: float, cfg, pres
             sel, justified = (s2, e2), True
     s, e = sel
     e = _adjust_end(e, curve, e1, preset, dur)       # el audio decide cuándo terminó la reacción y se vio el resultado
+    if end_barrier is not None and e.t > end_barrier.t:
+        e = end_barrier                              # ...pero sin cruzar un cambio visual hacia otra situación
     notes: list[str] = []
     s_t, e_t = s.t, e.t
     s_kind, e_kind, s_reason, e_reason = s.kind, e.kind, s.reason, e.reason
@@ -248,12 +268,12 @@ def build_window(c: Candidate, segs: list[Segment], curve, dur: float, cfg, pres
     if bad or end <= start:                               # un corte dentro de una frase invalida la construcción: respaldo al evento
         fi, fo = _fades(e0, e1, segs, curve, cfg) if curve is not None else (0.0, 0.0)
         ctxinfo = _info(preset, c, (e0, e1), (e0, e1), (e0, e1), "estimacion", "estimacion", "la construcción cortaba una frase: se conserva el evento",
-                        "la construcción cortaba una frase: se conserva el evento", notes + ["respaldo: evento sin contexto"], False)
+                        "la construcción cortaba una frase: se conserva el evento", notes + ["respaldo: evento sin contexto"], False, sig)
         return Refined(e0, e1, ["la construcción contextual cortaba una frase: se conserva el evento"], None, False, None, fi, fo, (P["min"], P["max"]), ctxinfo)
     fi, fo = _fades(start, end, segs, curve, cfg) if curve is not None else (0.0, 0.0)
     pre, post = e0 - start, end - e1
     notes.append(f"contexto: {max(pre, 0):.0f} s antes y {max(post, 0):.0f} s después del momento ({L:.0f} s)")
-    info = _info(preset, c, (e0, e1), (start0, end0), (start, end), s_kind, e_kind, s_reason, e_reason, notes, justified)
+    info = _info(preset, c, (e0, e1), (start0, end0), (start, end), s_kind, e_kind, s_reason, e_reason, notes, justified, sig)
     return Refined(start, end, [f"inicio: {s_reason}", f"fin: {e_reason}"] + notes, None, True, None, fi, fo, (P["min"], P["max"]), info)
 
 
@@ -262,15 +282,18 @@ class _T:                         # adaptador mínimo para reutilizar check_boun
         self.segments = segs
 
 
-def _info(preset, c, event, contextual, final, s_kind, e_kind, s_reason, e_reason, notes, exceptional) -> dict:
+def _info(preset, c, event, contextual, final, s_kind, e_kind, s_reason, e_reason, notes, exceptional, signals=None) -> dict:
     kinds = {s_kind, e_kind}
     conf = "baja" if kinds & {"estimacion", "sinhabla"} else "alta" if kinds <= set(NATURAL) else "media"
+    visual = "transicion" in kinds
     return {
         "preset": preset, "original": [round(c.start, 2), round(c.end, 2)], "event": [round(event[0], 2), round(event[1], 2)],
         "contextual": [round(contextual[0], 2), round(contextual[1], 2)], "final": [round(final[0], 2), round(final[1], 2)],
         "start_kind": s_kind, "end_kind": e_kind, "start_reason": s_reason, "end_reason": e_reason, "confidence": conf,
         "estimated": bool(kinds & {"estimacion", "sinhabla"}), "exceptional": exceptional, "notes": notes,
-        "method": "estimación conservadora" if kinds <= {"estimacion", "sinhabla"} else "transcripción + audio",
+        "method": "estimación conservadora" if kinds <= {"estimacion", "sinhabla"} else "transcripción + audio" + (" + cambios visuales" if visual else ""),
+        "boundary_evidence": {"start": "respaldado" if s_kind in BACKED else "estimado", "end": "respaldado" if e_kind in BACKED else "estimado"},
+        "signals": signals or {"visual_transitions": [], "barrier_start": None, "barrier_end": None},
     }
 
 

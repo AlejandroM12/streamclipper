@@ -16,7 +16,8 @@ from streamclipper.auto import (
 )
 from streamclipper.core.errors import CancelledError, InvalidInputError, MediaError, StreamClipperError
 from streamclipper.edit import EditParams, render_edit
-from streamclipper.expand import prepare_context
+from streamclipper.expand import load_proposal, prepare_context
+from streamclipper.jobs import load_result
 from streamclipper.media.download import DownloadLimits, download_media, download_segment, format_hms, parse_media_url
 from streamclipper.models import Candidate, Transcript, Word
 from streamclipper.models import Segment as TSegment
@@ -382,6 +383,62 @@ def run_context(settings: Settings, ydl_factory=None):
     return runner
 
 
+def _plain_proposal(d: Path, clip: str) -> dict:
+    """Sin ampliar: la propuesta es el intervalo del clip original (solo cambiaría la composición)."""
+    entry = next((c for c in load_result(d).get("clips", []) if c["name"] == clip), None)
+    if entry is None:
+        raise InvalidInputError(f"El clip {clip} no existe en esta sesión.")
+    dur = round(float(entry["end"]) - float(entry["start"]), 2)
+    return {"source": "own", "start": float(entry["start"]), "end": float(entry["end"]), "duration": dur, "context": None,
+            "original": {"duration": dur}, "plain": True}
+
+
+def run_bulk(settings: Settings, ydl_factory=None):
+    """Clips de uno en uno. Un clip fallido no detiene a los demás; si alguno falla el trabajo queda «fallido» para poder reintentar solo esos."""
+    def runner(job: AppJob, ctl: JobControl) -> None:
+        mode, o = job.params["mode"], job.params["options"]
+        items = job.result["items"]
+        n = len(items)
+        for i, it in enumerate(items):
+            ctl.cancel.check()
+            if it["status"] == "done":
+                continue
+            ctl.stage("bulk", "running", sum(x["status"] == "done" for x in items) / n, f"clip {i + 1} de {n}: {it['clip']}")
+            it.update(status="running", message="", error=None)
+            ctl.set(result=job.result)
+            try:
+                d = session_dir(settings, it["session"])
+                if mode == "propose":
+                    prop = (prepare_context(d, it["clip"], o["preset"], settings, ctl.cancel, None, ydl_factory) if o["extend"]
+                            else _plain_proposal(d, it["clip"]))
+                    x = prop.get("context") or {}
+                    it["proposal"] = {"start": prop["start"], "end": prop["end"], "duration": prop["duration"], "original": prop["original"]["duration"],
+                                      "confidence": x.get("confidence"), "start_kind": x.get("start_kind"), "end_kind": x.get("end_kind"),
+                                      "estimated": x.get("estimated"), "evidence": x.get("boundary_evidence"), "plain": bool(prop.get("plain"))}
+                else:
+                    prop = load_proposal(d, it["clip"]) if o["extend"] else _plain_proposal(d, it["clip"])
+                    if prop is None:
+                        raise InvalidInputError("No hay una propuesta de contexto para este clip: primero usá «Ver propuestas».")
+                    params = EditParams(start=prop["start"], end=prop["end"], context=prop.get("source") == "context",
+                                        note=prop.get("context") if o["extend"] else None, composition=o.get("composition"))
+                    meta = render_edit(d, it["clip"], params, settings, ctl.cancel)
+                    it["version"], it["duration"] = meta["version"], meta["duration"]
+                it["status"] = "done"
+            except CancelledError:
+                it["status"] = "cancelled"
+                ctl.set(result=job.result)
+                raise
+            except StreamClipperError as e:
+                it.update(status="failed", error=str(e))
+            ctl.set(result=job.result)
+        failed = [x for x in items if x["status"] == "failed"]
+        ctl.stage("bulk", "done", 1.0, "")
+        ctl.set(message=f"{n - len(failed)} de {n} clip(s) listos." + (f" {len(failed)} fallaron: podés reintentarlos." if failed else ""))
+        if failed:
+            raise StreamClipperError(f"{len(failed)} de {n} clip(s) no se pudieron procesar: " + "; ".join(f"{x['clip']}: {x['error']}" for x in failed[:3]))
+    return runner
+
+
 def run_edit(settings: Settings):
     def runner(job: AppJob, ctl: JobControl) -> None:
         p = job.params
@@ -399,4 +456,4 @@ def default_runners(settings: Settings) -> dict:
 
     def route(job: AppJob, ctl: JobControl) -> None:      # un mismo tipo de trabajo (vod) con dos modos: tramos manuales o automático
         (auto if job.params.get("mode") == "auto" else vod)(job, ctl)
-    return {"process": run_process(settings), "edit": run_edit(settings), "vod": route, "context": run_context(settings)}
+    return {"process": run_process(settings), "edit": run_edit(settings), "vod": route, "context": run_context(settings), "bulk": run_bulk(settings)}

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from streamclipper.analysis.audio import analyze_audio
+from streamclipper.analysis.transitions import detect_transitions
 from streamclipper.auto import FETCH_S, merge_transcripts
 from streamclipper.core.cancel import CancelToken
 from streamclipper.core.config import Settings
@@ -126,12 +127,12 @@ def prepare_context(job_dir: Path, clip: str, preset: str, settings: Settings, c
         shutil.rmtree(work, ignore_errors=True)
 
 
-def _build(cand_raw: dict | None, ev_local: tuple[float, float], segs, curve, dur: float, shift: float, preset: str, cfg):
+def _build(cand_raw: dict | None, ev_local: tuple[float, float], segs, curve, dur: float, shift: float, preset: str, cfg, transitions=None):
     """Construcción en el eje LOCAL de la ventana analizada. `shift` pasa los tiempos del candidato guardado a ese eje."""
     mid = (ev_local[0] + ev_local[1]) / 2
     cand = Candidate(start=cand_raw["start"] - shift if cand_raw else ev_local[0], end=cand_raw["end"] - shift if cand_raw else ev_local[1],
                      anchor=cand_raw["anchor"] - shift if cand_raw else mid, triggers=cand_raw.get("triggers", []) if cand_raw else [])
-    return build_window(cand, segs, curve, dur, cfg, preset, event=ev_local)
+    return build_window(cand, segs, curve, dur, cfg, preset, event=ev_local, transitions=transitions)
 
 
 def _axis(ctx: dict | None, off: float) -> dict | None:
@@ -151,10 +152,11 @@ def _from_own_source(job_dir, result, entry, cand_raw, ev, preset, cfg, cancel, 
     a, b = max(0.0, ev[0] - FETCH_S), min(dur, ev[1] + FETCH_S)
     tr = Transcript.from_dict(json.loads((job_dir / "transcript.json").read_text(encoding="utf-8")))
     curve = _audio_curve(src, a, b, cfg, work, cancel)
-    w = _build(cand_raw, (ev[0] - a, ev[1] - a), _shifted(tr, a, 0, b - a), curve, b - a, a, preset, cfg)
+    trn = detect_transitions(src, cfg.ffmpeg, a, b, cancel)           # cambios visuales: límites entre situaciones distintas
+    w = _build(cand_raw, (ev[0] - a, ev[1] - a), _shifted(tr, a, 0, b - a), curve, b - a, a, preset, cfg, [t - a for t in trn.times])
     # el eje del editor es el de la fuente de la sesión: local + a
     return {"source": "own", "start": round(w.start + a, 2), "end": round(w.end + a, 2), "context": _axis(w.context, a), "abs": None,
-            "_orig_shift": 0.0}
+            "_orig_shift": 0.0, "transitions": trn.to_dict()}
 
 
 def _from_vod(job_dir, entry, cand_raw, ev, meta, preset, cfg, settings, cancel, work, ydl_factory) -> dict:
@@ -186,6 +188,8 @@ def _from_vod(job_dir, entry, cand_raw, ev, meta, preset, cfg, settings, cancel,
     (ctx_dir / "meta.json").write_text(json.dumps({"source": "source.mp4", "offset": a, "range": [a, b], "url": meta["url"]}), encoding="utf-8")
     curve = _audio_curve(dst, 0.0, dur, cfg, work, cancel)
     # eje del editor = eje del recorte de contexto (local). El candidato guardado está en el eje del recorte original: local = cut_a + t - a
-    w = _build(cand_raw, (e0a - a, e1a - a), local.segments, curve, dur, a - cut_a, preset, cfg)
+    trn = detect_transitions(dst, cfg.ffmpeg, 0.0, dur, cancel)       # cambios visuales: límites entre situaciones distintas
+    w = _build(cand_raw, (e0a - a, e1a - a), local.segments, curve, dur, a - cut_a, preset, cfg, trn.times)
     return {"source": "context", "start": round(w.start, 2), "end": round(w.end, 2), "context": w.context,
-            "abs": {"start": round(w.start + a, 2), "end": round(w.end + a, 2), "context": _axis(w.context, a)}, "_orig_shift": cut_a - a}
+            "abs": {"start": round(w.start + a, 2), "end": round(w.end + a, 2), "context": _axis(w.context, a)}, "_orig_shift": cut_a - a,
+            "transitions": trn.to_dict()}

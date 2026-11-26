@@ -114,7 +114,7 @@ def editor_data(job_dir: Path, clip: str, settings: Settings, with_wave: bool = 
         "original": original, "candidate": [on(cand["start"]), on(cand["end"])] if cand else None, "anchor": on(cand["anchor"]) if cand else None,
         "event": [on(event[0]), on(event[1])] if event else original,
         "contextual": [prop["start"], prop["end"]] if prop and (ax["axis"] == "context" or prop.get("source") == "own") else None,
-        "context_info": prop.get("context") if prop else None, "built_context": ctx or None,
+        "context_info": prop.get("context") if prop else None, "transitions": (prop or {}).get("transitions"), "built_context": ctx or None,
         "versions": versions, "sentences": _sentences(ax["transcript"]),
         "waveform": waveform(path, job_dir / "editor" / "wave.json", settings.ffmpeg) if with_wave else [], "wave_hop": WAVE_HOP,
     }
