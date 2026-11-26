@@ -81,6 +81,10 @@ Si algo falla (por ejemplo, la fuente ya no existe) el modal lo explica, con una
 * Si la fuente ya no está disponible (archivo movido, VOD borrado) lo dice con un mensaje claro y no cambia nada.
 * No repite el análisis de 8 h: solo transcribe el rango necesario.
 
+## Señales visuales (1.5)
+
+Los límites del contexto también se apoyan en transiciones visuales (cambios de pregunta/pantalla) cuando las hay; ver [smart-editor.md](smart-editor.md).
+
 ## Limitaciones conocidas
 
 * No hay comprensión semántica ni visual de la escena; una pausa larga no siempre es el fin de una jugada.

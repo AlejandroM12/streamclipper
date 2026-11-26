@@ -73,6 +73,8 @@ Se puede cancelar y continuar (también tras cerrar la aplicación). Detalle, ti
 
 **Clips con contexto.** En *Nuevo* elegís «Duración de los clips» (Cortos, TikTok / Reels por defecto, Extendidos): el clip se construye alrededor del momento (dónde empieza la situación y cuándo termina), sin forzar una duración. En la galería cada clip muestra su duración final, el momento en el stream y por qué se cortó así; **Ampliar con contexto** propone un clip más completo, lo previsualizás y creás una versión nueva sin tocar el original. Detalle en [context-clips.md](context-clips.md).
 
+**Editor y composición.** «Editar clip» abre una línea de tiempo con forma de onda, frases, momento principal y límites; permite elegir la composición vertical (Original, Gameplay, Reacciones, Podcast, Personalizado) dibujando regiones sobre un fotograma, previsualizar y regenerar como versión nueva. En la galería también se pueden seleccionar varios clips y regenerarlos juntos (propuestas, confirmación, progreso por clip). Ver [smart-editor.md](smart-editor.md).
+
 ## Detección de momentos: Clásica o Smart Highlights
 
 En *Nuevo* se elige el modo de **Detección de momentos**. **Clásica** (por defecto) es el ranking original y la referencia.

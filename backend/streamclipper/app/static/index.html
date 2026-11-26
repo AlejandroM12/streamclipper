@@ -916,7 +916,7 @@ function openBulk(items, onDone) {
     el("div", { class: "row", style: "margin:8px 0" },
       el("label", { class: "fix", style: "display:flex;gap:6px;align-items:center;margin:0" }, extend, "Ampliar con contexto"), el("div", {}, el("label", {}, "Duración de los clips"), presetSel),
       el("div", {}, el("label", {}, "Composición visual"), compSel)),
-    el("div", { class: "small mut" }, "Para definir regiones (cámaras / contenido) abrí «Editar clip» en un clip y regeneralo una vez: la última composición queda disponible acá."),
+    el("div", { class: "small mut" }, "Para definir regiones (cámaras / contenido) abrí «Editar clip» en un clip y regeneralo una vez: la última composición queda disponible acá. ", el("strong", {}, "Las mismas regiones se aplican a todos los clips"), ": solo sirven si el stream mantiene el mismo diseño de pantalla (puede cambiar entre partes). Revisá cada resultado."),
     body, actions);
   drawStart();
 }
